@@ -1,2 +1,10 @@
 /target
-/.shots
+/dist
+.DS_Store
+
+# Screenshot and test scratch: keep the scripts, not their output.
+/.shots/*.png
+/.shots/winid
+/.shots/e2e/
+/.shots/lib/
+/.shots/spk/

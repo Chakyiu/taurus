@@ -1,0 +1,11 @@
+<!doctype html>
+<html><body style="margin:0">
+<iframe id="f" src="../design/index.html" style="border:0;width:1440px;height:900px"></iframe>
+<script>
+  const f = document.getElementById('f');
+  f.onload = () => {
+    const v = location.hash.slice(1);
+    if (v) f.contentDocument.querySelector('[data-nav="' + v + '"]').click();
+  };
+</script>
+</body></html>

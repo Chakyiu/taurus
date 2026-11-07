@@ -1,0 +1,56 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish Taurus.app as a zip and a disk image.
+# Running it by hand builds the same files as a workflow artifact only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  macos:
+    name: Bundle Taurus.app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.12.0 --locked
+
+      - name: Bundle
+        run: cargo bundle --release
+
+      - name: Sign and package
+        run: |
+          APP=target/release/bundle/osx/Taurus.app
+          NAME="Taurus-${GITHUB_REF_NAME//\//-}-macos-arm64"
+          # Not notarised: an ad-hoc signature lets it run once the user allows it.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          mkdir -p dist
+          ditto -c -k --keepParent "$APP" "dist/$NAME.zip"
+          hdiutil create -volname Taurus -srcfolder "$APP" -ov -format UDZO "dist/$NAME.dmg"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Taurus-macos-arm64
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

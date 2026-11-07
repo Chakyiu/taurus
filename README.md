@@ -62,6 +62,8 @@ open target/release/bundle/osx/Taurus.app
 
 This also writes a disk image, `target/release/bundle/dmg/Taurus.dmg`.
 
+On GitHub, every push and pull request is built and tested (`.github/workflows/ci.yml`). Pushing a tag such as `v0.2.0` publishes the app as a `.dmg` and a `.zip` on the Releases page (`.github/workflows/release.yml`). The app is signed ad hoc but not notarised, so on first launch, right-click it and choose **Open**.
+
 The first live caption asks for **Screen & System Audio Recording** permission, which is needed to hear the Mac's sound, or **Microphone** permission. You can manage both in System Settings, under Privacy & Security.
 
 ## Getting started
