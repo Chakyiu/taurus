@@ -1,0 +1,4 @@
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Taurus listens to the microphone when you caption it live.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Taurus records this Mac's sound when you caption it live.</string>

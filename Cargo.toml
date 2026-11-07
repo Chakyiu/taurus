@@ -1,0 +1,38 @@
+[package]
+name = "taurus"
+version = "0.1.0"
+edition = "2024"
+description = "Taurus, a subtitle translation workbench"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+gpui-component = "0.5.1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "7"
+ureq = { version = "3", features = ["json"] }
+whisper-rs = { version = "0.16", features = ["metal"] }
+cpal = "0.18"
+screencapturekit = "11"
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
+rustfft = "6"
+half = "2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[package.metadata.bundle]
+name = "Taurus"
+identifier = "app.taurus.workbench"
+icon = ["assets/icon/Taurus.icns"]
+category = "public.app-category.video"
+short_description = "Subtitle translation workbench"
+
+[package.metadata.bundle.osx]
+minimum_system_version = "13.0"
+info_plist_exts = ["assets/macos/Info.ext.plist"]

@@ -1,0 +1,2850 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Taurus · subtitle translation workbench</title>
+<style>
+/* OD-LAYOUT-PRIMITIVES v1 — structure only: display, flex/grid, overflow, wrapping, ratio, geometry.
+   Put this @layer first; product CSS outside the layer wins ordinary layout rules.
+   Native hidden and closed-dialog states take precedence over component display rules. */
+@layer od-layout {
+  [hidden]:not([hidden="until-found" i]) { display: none !important; }
+  dialog:not([open]) { display: none !important; }
+
+  :where(.od-stack,.od-row,.od-row-top,.od-cluster,.od-grid,.od-field,.od-stat,.od-cell,.od-tile) > :where(*) { min-width: 0; }
+
+  /* containers */
+  .od-stack   { display: flex; flex-direction: column; gap: var(--od-gap, 8px); }
+  .od-row     { display: flex; align-items: center; gap: var(--od-gap, 8px); }
+  .od-row-top { display: flex; align-items: flex-start; gap: var(--od-gap, 8px); }
+  .od-cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--od-gap, 8px); }
+  .od-fill    { flex: 1 1 0; min-width: 0; }
+  .od-fixed   { flex: none; }
+  .od-grid    { display: grid; gap: var(--od-gap, 12px); grid-template-columns: repeat(var(--od-cols, 3), minmax(0, 1fr)); }
+
+  /* stacked information: each piece is its own line — never sibling inline spans */
+  .od-stat, .od-field, .od-cell { display: grid; gap: var(--od-gap, 2px); }
+  :where(.od-stat,.od-field,.od-cell) > :where(*) { display: block; }
+  .od-tile { display: grid; grid-template-rows: auto 1fr; }
+  :where(.od-tile) > :where(*) { display: block; }
+
+  /* media keeps its intrinsic ratio by default; never a distorted or cropped
+     cover by accident. height:auto lets the ratio win over an <img height="…">
+     attribute. Cropping to a uniform box is an explicit opt-in: set --od-ratio
+     AND add .od-media-cover together (per the core rule, only where a crop is
+     deliberate — tile thumbs, decorative fills — never on full-frame content). */
+  .od-media { display: block; width: 100%; height: auto; aspect-ratio: var(--od-ratio, auto); }
+  .od-media-cover { object-fit: cover; }
+
+  /* functional inline SVG icons opt into bounded geometry; content SVGs keep their own */
+  .od-icon { display: inline-block; inline-size: var(--od-icon-size, 1em); block-size: var(--od-icon-size, 1em); flex: none; }
+
+  /* data text only — authored copy is rewritten to its budget instead */
+  .od-truncate { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .od-clamp-2, .od-clamp-3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .od-clamp-2 { -webkit-line-clamp: 2; }
+  .od-clamp-3 { -webkit-line-clamp: 3; }
+  .od-lines-2 { min-height: calc(2 * 1.4em); }   /* block-level reservation for a shared baseline */
+  .od-nowrap  { white-space: nowrap; }           /* 数字+单位 · 价格+起 · 日期+星期 */
+  .od-keep    { word-break: keep-all; overflow-wrap: anywhere; } /* CJK labels break at spaces / <wbr> first */
+
+  /* screen skeleton (optional): bars take their own space, the middle scrolls — no padding guessed for chrome */
+  .od-screen { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100%; }
+  .od-scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+
+  /* horizontal rail: the next item peeks at the edge; trailing room survives overflow */
+  .od-rail { display: flex; gap: var(--od-gap, 8px); overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none;
+             padding-inline: var(--od-rail-pad, 16px); scroll-padding-inline: var(--od-rail-pad, 16px); }
+  .od-rail::-webkit-scrollbar { display: none; }
+  :where(.od-rail) > :where(*) { flex: none; scroll-snap-align: start; }
+  :where(.od-rail) > :where(:last-child) { margin-inline-end: var(--od-rail-pad, 16px); }
+
+  .od-spacer { flex: none; visibility: hidden; pointer-events: none; }
+  .od-touch  { min-width: 44px; min-height: 44px; }
+}
+:root [hidden]:where(:not([hidden="until-found" i])) { display: none; }
+/* /OD-LAYOUT-PRIMITIVES v1 */
+
+/* Type scale (30 / 21 / 16 / 13 / 12) and the heading roles built on it.
+   Defined once, here with the entry document, so the scale travels with the
+   page; styles.css consumes the same custom properties and never restates a
+   size. */
+:root {
+  --t-display: 30px;
+  --t-head:    21px;
+  --t-body:    16px;
+  --t-small:   13px;
+  --t-micro:   12px;
+}
+body         { font-size: var(--t-body); }
+.view-title  { font-size: var(--t-display); }
+.step-title,
+.dlg-title   { font-size: var(--t-head); }
+.empty-title { font-size: 25px; }
+</style>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark"><span data-icon="waveform"></span></span>
+      <span class="brand-name">Taurus</span>
+    </div>
+
+    <nav class="nav od-scroll" aria-label="Workspace">
+      <button class="nav-item" type="button" data-nav="projects" aria-current="page">
+        <span data-icon="projects"></span>
+        <span class="nav-label">Projects</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="live">
+        <span data-icon="waveform"></span>
+        <span class="nav-label">Live caption</span>
+        <span class="nav-dot" id="nav-dot" hidden></span>
+      </button>
+      <button class="nav-item" type="button" data-nav="editor">
+        <span data-icon="editor"></span>
+        <span class="nav-label">Subtitle editor</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="extract">
+        <span data-icon="film"></span>
+        <span class="nav-label">Extract from video</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="glossary">
+        <span data-icon="tag"></span>
+        <span class="nav-label">Glossary</span>
+      </button>
+      <button class="nav-item" type="button" data-nav="export">
+        <span data-icon="download"></span>
+        <span class="nav-label">Export</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="engine od-row">
+        <span class="engine-dot"></span>
+        <span class="od-field">
+          <span class="engine-title">Engine ready</span>
+          <span class="engine-sub">Local · zh ⇄ en pack</span>
+        </span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <!-- ══════════════ LIVE ══════════════ -->
+    <section class="view od-screen" id="view-live" aria-labelledby="live-title" hidden>
+      <header class="view-head">
+        <div class="projbar od-row">
+          <span class="projbar-mark od-fixed" id="lv-pb-mark" data-kind="audio"></span>
+          <span class="od-field od-fill">
+            <span class="projbar-name od-truncate" id="lv-pb-name">No capture yet</span>
+            <span class="projbar-meta od-truncate" id="lv-pb-meta">Press Start captioning and a project is created to hold the track.</span>
+          </span>
+          <div class="projbar-prog od-fixed" id="lv-pb-prog" hidden>
+            <span class="projbar-prog-top">
+              <span class="field-label" id="lv-pb-prog-label">Review complete</span>
+              <span class="projbar-prog-pct mono" id="lv-pb-prog-pct">0%</span>
+            </span>
+            <span class="bar" id="lv-pb-prog-bar" role="progressbar" aria-labelledby="lv-pb-prog-label"
+                  aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span class="bar-fill" id="lv-pb-prog-fill" style="width:0%"></span>
+            </span>
+            <span class="projbar-prog-note" id="lv-pb-prog-note">–</span>
+          </div>
+          <span class="pill od-fixed" id="lv-pb-status" data-s="live" hidden><span class="pill-dot"></span>Recording</span>
+          <div class="od-cluster od-fixed projbar-acts">
+            <button class="btn btn-ghost" type="button" id="lv-rename" disabled>Rename</button>
+            <button class="btn btn-ghost" type="button" id="lv-open" disabled><span data-icon="editor"></span>Open in editor</button>
+          </div>
+        </div>
+
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="live-title">Live caption</h1>
+            <p class="view-sub">Listens to this Mac, a microphone, or a region of the screen, and writes both languages as it goes. The project is created the moment you start, so there is nothing to remember to save.</p>
+          </div>
+          <span class="status-chip od-fixed" id="live-status" role="status" data-state="idle">
+            <span class="status-dot"></span>
+            <span id="live-status-text">Idle</span>
+          </span>
+        </div>
+
+        <div class="sourcebar">
+          <div class="od-field">
+            <span class="field-label" id="src-label">Source</span>
+              <div class="segmented" role="group" aria-labelledby="src-label">
+                <button class="seg" type="button" aria-pressed="true" data-source="system"><span data-icon="monitor"></span>This Mac</button>
+                <button class="seg" type="button" aria-pressed="false" data-source="mic"><span data-icon="mic"></span>Microphone</button>
+                <button class="seg" type="button" aria-pressed="false" data-source="screen"><span data-icon="crop"></span>Screen region</button>
+              </div>
+          </div>
+
+          <div class="od-field" id="source-detail-wrap">
+            <label class="field-label" for="source-detail">Capturing</label>
+            <select class="input" id="source-detail"></select>
+          </div>
+
+          <div class="langpair">
+            <div class="od-field">
+              <label class="field-label" for="live-from">Heard</label>
+              <select class="input" id="live-from"></select>
+            </div>
+            <button class="btn btn-icon swap" type="button" id="live-swap" aria-label="Swap the two languages"><span data-icon="swap"></span></button>
+            <div class="od-field">
+              <label class="field-label" for="live-to">Translated to</label>
+              <select class="input" id="live-to"></select>
+            </div>
+          </div>
+
+          <div class="od-cluster od-fixed">
+            <button class="btn btn-primary" type="button" id="live-start"><span data-icon="play"></span>Start captioning</button>
+            <button class="btn btn-ghost" type="button" id="live-pause" disabled><span data-icon="pause"></span>Pause</button>
+            <button class="btn btn-ghost" type="button" id="live-stop" disabled><span data-icon="stop"></span>Stop</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="live-body">
+        <div class="transcript-pane od-screen">
+          <div class="transcript-head od-row">
+            <span class="card-label">Transcript</span>
+            <span class="od-fill"></span>
+            <label class="switch">
+              <input type="checkbox" id="opt-provisional" checked>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">Provisional words</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="opt-terms" checked>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">Mark glossary hits</span>
+            </label>
+            <button class="btn btn-ghost btn-danger-ghost" type="button" id="live-discard" disabled>Discard capture</button>
+          </div>
+
+          <div class="transcript od-scroll" id="transcript">
+            <div class="empty" id="live-empty">
+              <h2 class="empty-title">Nothing captured yet</h2>
+              <p class="empty-text">Pick a source above and press <strong>Start captioning</strong>. Taurus listens to this Mac's own output by default, so a meeting or a video needs no cables or routing. The project that holds the track is created as soon as you start.</p>
+              <div class="empty-acts od-cluster">
+                <button class="btn btn-primary" type="button" data-act="start-live">Start captioning</button>
+                <button class="btn btn-ghost" type="button" data-go="projects">Open an earlier project</button>
+              </div>
+            </div>
+            <div id="transcript-list" role="log"></div>
+            <div class="seg-line is-live" id="live-line" hidden>
+              <span class="seg-time mono" id="live-line-time">00:00</span>
+              <div class="seg-texts">
+                <p class="line-orig" id="live-line-orig"></p>
+                <p class="line-trans" id="live-line-trans"></p>
+              </div>
+            </div>
+          </div>
+
+          <div class="overlay-preview" id="overlay-preview" hidden>
+            <span class="overlay-tag">Viewer overlay preview</span>
+            <div class="overlay-bar" aria-live="polite">
+              <p class="overlay-orig" id="ov-orig"></p>
+              <p class="overlay-trans" id="ov-trans"></p>
+            </div>
+          </div>
+        </div>
+
+        <aside class="meters od-scroll" aria-label="Session meters">
+          <div class="meter-card">
+            <span class="card-label">Input level</span>
+            <div class="vu" id="vu"></div>
+            <p class="vu-source" id="vu-source">This Mac · all system output</p>
+          </div>
+
+          <div class="meter-grid">
+            <div class="stat od-stat">
+              <span class="stat-num mono" id="m-latency">–</span>
+              <span class="stat-cap">latency <span class="unit">ms</span></span>
+            </div>
+            <div class="stat od-stat">
+              <span class="stat-num mono" id="m-wpm">–</span>
+              <span class="stat-cap">words <span class="unit">/ min</span></span>
+            </div>
+            <div class="stat od-stat">
+              <span class="stat-num mono" id="m-elapsed">00:00</span>
+              <span class="stat-cap">elapsed</span>
+            </div>
+            <div class="stat od-stat">
+              <span class="stat-num mono" id="m-terms">0</span>
+              <span class="stat-cap">glossary hits</span>
+            </div>
+          </div>
+
+          <div class="meter-card">
+            <span class="card-label">Session</span>
+            <dl class="kv">
+              <div class="kv-row"><dt>Source</dt><dd id="kv-source">This Mac · all system output</dd></div>
+              <div class="kv-row"><dt>Pair</dt><dd id="kv-pair">English → Chinese (Simplified)</dd></div>
+              <div class="kv-row"><dt>Window</dt><dd>streaming · 200 ms</dd></div>
+              <div class="kv-row"><dt>Started</dt><dd id="kv-started">Not started</dd></div>
+            </dl>
+          </div>
+
+          <div class="meter-card">
+            <span class="card-label">Glossary holding</span>
+            <ul class="term-list" id="term-hits"></ul>
+            <p class="hint" id="term-hits-empty">Terms light up here as they are pinned in the translation.</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ══════════════ PROJECTS ══════════════ -->
+    <section class="view od-screen" id="view-projects" aria-labelledby="projects-title">
+      <header class="view-head">
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="projects-title">Projects</h1>
+            <p class="view-sub">One video or sound track is one project. Everything captured, imported or extracted lives here.</p>
+          </div>
+          <div class="od-cluster od-fixed">
+            <button class="btn btn-ghost" type="button" data-go="extract"><span data-icon="film"></span>New from video</button>
+            <button class="btn btn-primary" type="button" data-go="live"><span data-icon="waveform"></span>New from capture</button>
+          </div>
+        </div>
+
+        <div class="toolbar od-cluster">
+          <div class="od-field">
+            <label class="field-label" for="pj-search">Search</label>
+            <span class="search">
+              <span data-icon="search"></span>
+              <input class="input" type="search" id="pj-search" autocomplete="off">
+            </span>
+          </div>
+          <div class="od-field">
+            <span class="field-label" id="pj-filter-label">Show</span>
+            <div class="od-cluster" role="group" aria-labelledby="pj-filter-label" id="pj-filters"></div>
+          </div>
+        </div>
+      </header>
+
+      <div class="pad od-scroll">
+        <div class="list-head" aria-hidden="true">
+          <span>Project</span>
+          <span>Status</span>
+          <span>Languages</span>
+          <span>Length</span>
+          <span>Progress</span>
+          <span></span>
+        </div>
+        <ul class="projlist" id="projlist"></ul>
+        <div class="empty" id="pj-empty" hidden>
+          <h2 class="empty-title">No matches</h2>
+          <p class="empty-text">No project matches that search and filter. Clear them both to see every track again.</p>
+          <div class="empty-acts"><button class="btn btn-ghost" type="button" id="pj-clear">Clear filters</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ EDITOR ══════════════ -->
+    <section class="view od-screen" id="view-editor" aria-labelledby="editor-title" hidden>
+      <header class="view-head">
+        <div class="projbar od-row">
+          <button class="btn btn-icon od-fixed" type="button" data-go="projects" aria-label="Back to all projects"><span data-icon="back"></span></button>
+          <span class="projbar-mark od-fixed" id="ed-pb-mark" data-kind="subtitle"></span>
+          <span class="od-field od-fill">
+            <span class="projbar-name od-truncate" id="ed-pb-name">No project open</span>
+            <span class="projbar-meta od-truncate" id="ed-pb-meta">Open a project from Projects.</span>
+          </span>
+          <div class="projbar-prog od-fixed" id="ed-pb-prog" hidden>
+            <span class="projbar-prog-top">
+              <span class="field-label" id="ed-pb-prog-label">Review complete</span>
+              <span class="projbar-prog-pct mono" id="ed-pb-prog-pct">0%</span>
+            </span>
+            <span class="bar" id="ed-pb-prog-bar" role="progressbar" aria-labelledby="ed-pb-prog-label"
+                  aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span class="bar-fill" id="ed-pb-prog-fill" style="width:0%"></span>
+            </span>
+            <span class="projbar-prog-note" id="ed-pb-prog-note">–</span>
+          </div>
+          <span class="pill od-fixed" id="ed-pb-status" data-s="review" hidden><span class="pill-dot"></span>Needs review</span>
+          <div class="od-field od-fixed projbar-sw">
+            <label class="field-label" for="ed-project">Project</label>
+            <select class="input projbar-switch" id="ed-project"></select>
+          </div>
+        </div>
+
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="editor-title">Subtitle editor</h1>
+            <p class="view-sub" id="editor-sub">–</p>
+          </div>
+          <div class="od-cluster od-fixed">
+            <button class="btn btn-ghost" type="button" id="ed-export"><span data-icon="download"></span>Export</button>
+            <button class="btn btn-primary" type="button" id="ed-save"><span data-icon="check"></span>Save changes</button>
+          </div>
+        </div>
+
+        <div class="toolbar od-cluster">
+          <div class="od-field">
+            <span class="field-label" id="ed-filter-label">Show</span>
+            <div class="od-cluster" role="group" aria-labelledby="ed-filter-label" id="ed-filters"></div>
+          </div>
+          <div class="od-field">
+            <span class="field-label">Selection</span>
+            <div class="od-cluster">
+              <button class="btn btn-ghost" type="button" id="ed-retranslate" disabled><span data-icon="refresh"></span>Retranslate selected</button>
+              <button class="btn btn-ghost" type="button" id="ed-clear-sel" disabled>Clear selection</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div class="editor-body">
+        <div class="od-screen">
+          <div class="seg-head">
+            <span>#</span>
+            <span>Timecode</span>
+            <span id="ed-col-orig">Original</span>
+            <span id="ed-col-trans">Translation</span>
+            <span>Checks</span>
+          </div>
+          <div class="od-scroll">
+            <ul class="seglist" id="seglist"></ul>
+            <div class="empty" id="ed-empty" hidden>
+              <h2 class="empty-title" id="ed-empty-title">Nothing to show</h2>
+              <p class="empty-text" id="ed-empty-text">No segment matches this filter. Switch back to <strong>All</strong> to see the whole track.</p>
+              <div class="empty-acts">
+                <button class="btn btn-ghost" type="button" id="ed-show-all">Show all segments</button>
+                <button class="btn btn-primary" type="button" data-go="projects" id="ed-empty-go" hidden>Go to Projects</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="insp od-scroll" aria-label="Segment inspector">
+          <div class="cap-stage">
+            <div class="waveform" id="insp-wave"></div>
+            <div class="cap-overlay">
+              <p class="overlay-orig" id="insp-orig">Select a segment</p>
+              <p class="overlay-trans" id="insp-trans"></p>
+            </div>
+          </div>
+
+          <div class="meter-card">
+            <span class="card-label">Subtitle checks</span>
+            <ul class="checklist" id="insp-checks">
+              <li class="check-item" data-ok="yes"><span data-icon="check"></span>Pick a row to see how it reads on screen.</li>
+            </ul>
+          </div>
+
+          <div class="meter-card">
+            <span class="card-label">This segment</span>
+            <dl class="kv">
+              <div class="kv-row"><dt>In</dt><dd class="mono" id="insp-in">–</dd></div>
+              <div class="kv-row"><dt>Out</dt><dd class="mono" id="insp-out">–</dd></div>
+              <div class="kv-row"><dt>Duration</dt><dd class="mono" id="insp-dur">–</dd></div>
+              <div class="kv-row"><dt>Gap to next</dt><dd class="mono" id="insp-gap">–</dd></div>
+            </dl>
+          </div>
+
+          <div class="od-cluster">
+            <button class="btn btn-ghost" type="button" id="insp-retranslate" disabled><span data-icon="refresh"></span>Retranslate this line</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ══════════════ EXTRACT ══════════════ -->
+    <section class="view od-screen" id="view-extract" aria-labelledby="extract-title" hidden>
+      <header class="view-head">
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="extract-title">Extract from video</h1>
+            <p class="view-sub">Lifts an existing subtitle track out of a video, or transcribes the audio when there is none. The finished track becomes a new project.</p>
+          </div>
+        </div>
+      </header>
+
+      <div class="pad od-scroll">
+        <div class="extract-wrap">
+
+          <section id="ex-step-1">
+            <div class="step-head">
+              <h2 class="step-title">1 · Choose a video</h2>
+              <p class="step-note">MP4, MKV, MOV or WebM. Nothing is uploaded; the file is read where it sits.</p>
+            </div>
+            <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose a video file, or drop one here">
+              <span class="drop-icon" data-icon="upload"></span>
+              <p class="drop-title">Drop a video here</p>
+              <p class="drop-sub">or click to browse your files</p>
+              <span class="btn btn-ghost drop-btn">Browse files</span>
+            </div>
+            <p class="sample-line small muted">No video handy? <button class="linkbtn" type="button" id="ex-sample">Use the sample file</button>, a short product demo with two subtitle tracks.</p>
+            <input type="file" id="ex-file" accept="video/*" class="sr-only" tabindex="-1" aria-hidden="true">
+          </section>
+
+          <section id="ex-step-2" hidden>
+            <div class="step-head">
+              <h2 class="step-title">2 · Pick what to translate</h2>
+              <p class="step-note">Embedded tracks are used as-is. Transcribing takes longer but works on anything.</p>
+            </div>
+
+            <div class="filecard od-row">
+              <span class="filecard-mark" data-icon="film"></span>
+              <span class="od-field od-fill">
+                <span class="filecard-name od-truncate" id="ex-name">–</span>
+                <span class="filecard-meta mono" id="ex-meta">–</span>
+              </span>
+              <button class="btn btn-ghost od-fixed" type="button" id="ex-change">Change</button>
+            </div>
+
+            <div class="scan" id="ex-scan">
+              <div class="scanbar"><span class="scanbar-fill" id="ex-scanbar"></span></div>
+              <p class="small muted" id="ex-scan-text">Reading container…</p>
+            </div>
+
+            <div id="ex-after-scan" hidden>
+              <fieldset class="tracks">
+                <legend class="field-label">Found in this file</legend>
+                <div class="radio-rows" id="ex-tracks"></div>
+              </fieldset>
+
+              <div class="lang-row od-cluster">
+                <div class="od-field">
+                  <label class="field-label" for="ex-from">Source language</label>
+                  <select class="input" id="ex-from"></select>
+                </div>
+                <div class="od-field">
+                  <label class="field-label" for="ex-to">Translate to</label>
+                  <select class="input" id="ex-to"></select>
+                </div>
+              </div>
+
+              <div class="od-cluster">
+                <button class="btn btn-primary" type="button" id="ex-run"><span data-icon="play"></span>Extract and translate</button>
+                <button class="btn btn-ghost" type="button" id="ex-reset">Start over</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="ex-step-3" hidden>
+            <div class="step-head">
+              <h2 class="step-title">3 · Working</h2>
+              <p class="step-note" id="ex-run-note">Each stage writes into the same project, so you can open it as soon as segments exist.</p>
+            </div>
+            <ul class="stages" id="ex-stages"></ul>
+            <div class="od-cluster">
+              <button class="btn btn-primary" type="button" id="ex-open" disabled><span data-icon="editor"></span>Open the project</button>
+              <button class="btn btn-ghost" type="button" id="ex-again" hidden>Extract another video</button>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ GLOSSARY ══════════════ -->
+    <section class="view od-screen" id="view-glossary" aria-labelledby="glossary-title" hidden>
+      <header class="view-head">
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="glossary-title">Glossary</h1>
+            <p class="view-sub">Terms you want pinned, names left alone, and translations you never want to see again. Shared across every project unless you tie one to a single track.</p>
+          </div>
+          <div class="od-cluster od-fixed">
+            <button class="btn btn-primary" type="button" id="gl-add"><span data-icon="plus"></span>Add term</button>
+          </div>
+        </div>
+
+        <div class="toolbar od-cluster">
+          <div class="od-field">
+            <label class="field-label" for="gl-search">Search</label>
+            <span class="search">
+              <span data-icon="search"></span>
+              <input class="input" type="search" id="gl-search" autocomplete="off">
+            </span>
+          </div>
+          <div class="od-field">
+            <label class="field-label" for="gl-scope">Applies to</label>
+            <select class="input" id="gl-scope"></select>
+          </div>
+        </div>
+      </header>
+
+      <div class="pad od-scroll">
+        <div class="gl-head" aria-hidden="true">
+          <span>Term</span>
+          <span>Becomes</span>
+          <span>Rule</span>
+          <span>Applies to</span>
+          <span>Hits</span>
+          <span></span>
+        </div>
+        <ul class="gllist" id="gllist"></ul>
+        <div class="empty" id="gl-empty" hidden>
+          <h2 class="empty-title">No terms here yet</h2>
+          <p class="empty-text">A glossary earns its keep on the second episode. Add the names, product words and units you keep correcting by hand.</p>
+          <div class="empty-acts"><button class="btn btn-primary" type="button" id="gl-empty-add">Add the first term</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ EXPORT ══════════════ -->
+    <section class="view od-screen" id="view-export" aria-labelledby="export-title" hidden>
+      <header class="view-head">
+        <div class="projbar od-row">
+          <button class="btn btn-icon od-fixed" type="button" data-go="projects" aria-label="Back to all projects"><span data-icon="back"></span></button>
+          <span class="projbar-mark od-fixed" id="exp-pb-mark" data-kind="subtitle"></span>
+          <span class="od-field od-fill">
+            <span class="projbar-name od-truncate" id="exp-pb-name">No project open</span>
+            <span class="projbar-meta od-truncate" id="exp-pb-meta">Open a project from Projects.</span>
+          </span>
+          <div class="projbar-prog od-fixed" id="exp-pb-prog" hidden>
+            <span class="projbar-prog-top">
+              <span class="field-label" id="exp-pb-prog-label">Review complete</span>
+              <span class="projbar-prog-pct mono" id="exp-pb-prog-pct">0%</span>
+            </span>
+            <span class="bar" id="exp-pb-prog-bar" role="progressbar" aria-labelledby="exp-pb-prog-label"
+                  aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span class="bar-fill" id="exp-pb-prog-fill" style="width:0%"></span>
+            </span>
+            <span class="projbar-prog-note" id="exp-pb-prog-note">–</span>
+          </div>
+          <span class="pill od-fixed" id="exp-pb-status" data-s="review" hidden><span class="pill-dot"></span>Needs review</span>
+          <div class="od-field od-fixed projbar-sw">
+            <label class="field-label" for="exp-project">Project</label>
+            <select class="input projbar-switch" id="exp-project"></select>
+          </div>
+        </div>
+
+        <div class="od-cluster">
+          <div class="od-fill">
+            <h1 class="view-title" id="export-title">Export</h1>
+            <p class="view-sub">Everything here changes the preview on the right before you commit to a file. The file is recorded against this project.</p>
+          </div>
+        </div>
+      </header>
+
+      <div class="export-body">
+        <div class="opts pad od-scroll">
+          <fieldset class="optgroup">
+            <legend class="field-label">Format</legend>
+            <div class="radio-grid">
+              <label class="radio-tile"><input type="radio" name="exp-format" value="srt" checked><span class="tile-name">.srt</span><span class="tile-sub">SubRip</span></label>
+              <label class="radio-tile"><input type="radio" name="exp-format" value="vtt"><span class="tile-name">.vtt</span><span class="tile-sub">WebVTT</span></label>
+              <label class="radio-tile"><input type="radio" name="exp-format" value="ass"><span class="tile-name">.ass</span><span class="tile-sub">Advanced SSA</span></label>
+              <label class="radio-tile"><input type="radio" name="exp-format" value="txt"><span class="tile-name">.txt</span><span class="tile-sub">Plain text</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="optgroup">
+            <legend class="field-label">Lines</legend>
+            <div class="radio-rows">
+              <label class="radio-row">
+                <input type="radio" name="exp-layout" value="stacked" checked><span class="radio-mark"></span>
+                <span class="od-field"><span class="radio-title">Stacked bilingual</span><span class="radio-sub">Translation first, original underneath, the usual choice for learners.</span></span>
+              </label>
+              <label class="radio-row">
+                <input type="radio" name="exp-layout" value="orig-first"><span class="radio-mark"></span>
+                <span class="od-field"><span class="radio-title">Original on top</span><span class="radio-sub">Keeps the spoken line in the reading position.</span></span>
+              </label>
+              <label class="radio-row">
+                <input type="radio" name="exp-layout" value="trans"><span class="radio-mark"></span>
+                <span class="od-field"><span class="radio-title">Translation only</span><span class="radio-sub">One line per cue. Smallest file, cleanest screen.</span></span>
+              </label>
+              <label class="radio-row">
+                <input type="radio" name="exp-layout" value="orig"><span class="radio-mark"></span>
+                <span class="od-field"><span class="radio-title">Original only</span><span class="radio-sub">Ships the transcript without the translation.</span></span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="range-field od-field">
+            <label for="exp-wrap">Wrap lines at <span class="val mono" id="exp-wrap-val">42 characters</span></label>
+            <input type="range" id="exp-wrap" min="24" max="60" step="2" value="42">
+          </div>
+
+          <fieldset class="optgroup">
+            <legend class="field-label">Options</legend>
+            <div class="od-stack">
+              <label class="check">
+                <input type="checkbox" id="exp-merge">
+                <span class="check-box" data-icon="check"></span>
+                <span class="check-label">Merge cues with gaps under 120 ms</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="exp-flagged">
+                <span class="check-box" data-icon="check"></span>
+                <span class="check-label">Skip segments still flagged for review</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="exp-bom" checked>
+                <span class="check-box" data-icon="check"></span>
+                <span class="check-label">Write a UTF-8 byte-order mark</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="od-cluster">
+            <button class="btn btn-primary" type="button" id="exp-copy"><span data-icon="copy"></span>Copy subtitle text</button>
+            <button class="btn btn-ghost" type="button" id="exp-save"><span data-icon="download"></span>Save file</button>
+          </div>
+
+          <div class="meter-card" id="exp-hist-card">
+            <span class="card-label">Exported from this project</span>
+            <ul class="exp-hist" id="exp-hist"></ul>
+            <p class="hint" id="exp-hist-empty">Nothing exported yet. Anything you save or copy is listed here.</p>
+          </div>
+        </div>
+
+        <div class="preview-pane od-screen">
+          <div class="preview-head od-row">
+            <span class="card-label">Preview</span>
+            <span class="od-fill"></span>
+            <span class="data-cell" id="exp-meta">–</span>
+          </div>
+          <pre class="preview od-scroll" id="exp-preview"></pre>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ══════════════ DIALOGS ══════════════ -->
+<dialog class="dlg dlg-sm" id="dlg-confirm" aria-labelledby="dlg-confirm-title">
+  <div class="dlg-head od-row">
+    <h2 class="dlg-title od-fill" id="dlg-confirm-title">Delete this?</h2>
+  </div>
+  <div class="dlg-body">
+    <p class="dlg-text" id="dlg-confirm-text">This cannot be undone.</p>
+  </div>
+  <div class="dlg-foot od-row">
+    <span class="od-fill"></span>
+    <button class="btn btn-ghost" type="button" data-close-dlg>Cancel</button>
+    <button class="btn btn-danger" type="button" id="dlg-confirm-ok">Delete</button>
+  </div>
+</dialog>
+
+<dialog class="dlg" id="dlg-term" aria-labelledby="dlg-term-title">
+  <div class="dlg-head od-row">
+    <h2 class="dlg-title od-fill" id="dlg-term-title">Add a term</h2>
+    <button class="btn btn-icon od-fixed" type="button" data-close-dlg aria-label="Close"><span data-icon="x"></span></button>
+  </div>
+  <div class="dlg-body">
+    <div class="form-field od-field">
+      <label class="field-label" for="t-rule">Rule</label>
+      <select class="input" id="t-rule">
+        <option value="prefer">Prefer this translation</option>
+        <option value="keep">Keep as-is, never translate</option>
+        <option value="forbid">Forbid this translation</option>
+      </select>
+      <p class="hint" id="t-rule-hint">The translator is nudged toward your wording before the decoder commits.</p>
+    </div>
+    <div class="form-field od-field">
+      <label class="field-label" for="t-term">Term<span class="req">required</span></label>
+      <input class="input" id="t-term" autocomplete="off">
+      <p class="err" id="t-term-err" hidden></p>
+    </div>
+    <div class="form-field od-field" id="t-target-field">
+      <label class="field-label" for="t-target">Becomes<span class="req" id="t-target-req">required</span></label>
+      <input class="input" id="t-target" autocomplete="off">
+      <p class="err" id="t-target-err" hidden></p>
+    </div>
+    <div class="form-field od-field">
+      <label class="field-label" for="t-scope">Applies to</label>
+      <select class="input" id="t-scope"></select>
+    </div>
+  </div>
+  <div class="dlg-foot od-row">
+    <span class="od-fill"></span>
+    <button class="btn btn-ghost" type="button" data-close-dlg>Cancel</button>
+    <button class="btn btn-primary" type="button" id="dlg-term-ok">Save term</button>
+  </div>
+</dialog>
+
+<dialog class="dlg dlg-sm" id="dlg-rename" aria-labelledby="dlg-rename-title">
+  <div class="dlg-head od-row">
+    <h2 class="dlg-title od-fill" id="dlg-rename-title">Rename this project</h2>
+    <button class="btn btn-icon od-fixed" type="button" data-close-dlg aria-label="Close"><span data-icon="x"></span></button>
+  </div>
+  <div class="dlg-body">
+    <div class="form-field od-field">
+      <label class="field-label" for="s-name">Project name<span class="req">required</span></label>
+      <input class="input" id="s-name" autocomplete="off">
+      <p class="err" id="s-name-err" hidden></p>
+    </div>
+    <p class="dlg-text" id="dlg-rename-note">–</p>
+  </div>
+  <div class="dlg-foot od-row">
+    <span class="od-fill"></span>
+    <button class="btn btn-ghost" type="button" data-close-dlg>Cancel</button>
+    <button class="btn btn-primary" type="button" id="dlg-rename-ok">Save name</button>
+  </div>
+</dialog>
+
+<div class="toast-region" id="toasts" aria-live="polite"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   Taurus prototype behaviour.
+   One media track is one project: a project owns its source,
+   language pair, segments, review status and export history.
+   Live captioning is simulated from a fixed transcript; the file
+   side (flags, glossary rules, export text) is computed for real.
+   ═══════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+
+  /* ─── icons ─────────────────────────────────────────────── */
+  var ICONS = {
+    waveform: 'M4 10v4M8 7v10M12 3.5v17M16 8v8M20 11v2',
+    projects: 'M3.5 7.5a2 2 0 0 1 2-2h3.1l1.9 2.2h8a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2z',
+    captions: 'M3.5 5.5h17v13h-17zM7.6 10.4a2.4 2.4 0 1 0 0 3.2M16.4 10.4a2.4 2.4 0 1 0 0 3.2',
+    back: 'M19.5 12H4.5m0 0 6.3-6.3M4.5 12l6.3 6.3',
+    editor: 'M3.5 6h13M3.5 11h9M3.5 16h6M14 20.5l6.4-6.4a1.7 1.7 0 0 0-2.4-2.4L11.6 18l-.7 3.2z',
+    film: 'M3.5 5.5h17v13h-17zM3.5 9.6h17M3.5 14.4h17M7.8 5.5v13M16.2 5.5v13',
+    tag: 'M12.6 3.2H6.5a3 3 0 0 0-3 3v6.1a2 2 0 0 0 .6 1.5l7.3 7.3a2 2 0 0 0 2.8 0l6.1-6.1a2 2 0 0 0 0-2.8L14 3.8a2 2 0 0 0-1.4-.6zM8.2 8.4h.01',
+    download: 'M12 3.5v11.5m0 0 4.3-4.3M12 15l-4.3-4.3M4 19.5h16',
+    upload: 'M12 20.5V9m0 0 4.3 4.3M12 9l-4.3 4.3M4 4.5h16',
+    mic: 'M12 3.5a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0v-5a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5v3M9 20.5h6',
+    monitor: 'M3.5 4.5h17v11h-17zM9 20.5h6M12 15.5v5',
+    crop: 'M7.5 3v4.5H3M16.5 21v-4.5H21M3 16.5h4.5V21M21 7.5h-4.5V3',
+    swap: 'M7 6.5h12m0 0-3.2-3.2M19 6.5l-3.2 3.2M17 17.5H5m0 0 3.2-3.2M5 17.5l3.2 3.2',
+    play: 'M8 5.2 18.2 12 8 18.8z',
+    pause: 'M9.2 5.5v13M14.8 5.5v13',
+    stop: 'M6.8 6.8h10.4v10.4H6.8z',
+    check: 'M5 12.6 9.6 17.2 19 7.4',
+    alert: 'M12 4.2 21.2 19.8H2.8zM12 10v4M12 17h.01',
+    x: 'M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6',
+    plus: 'M12 5v14M5 12h14',
+    trash: 'M4 7h16M9.6 7V4.6h4.8V7M6.6 7l1 13h8.8l1-13M10.4 11v6M13.6 11v6',
+    search: 'M10.6 3.8a6.8 6.8 0 1 1 0 13.6 6.8 6.8 0 0 1 0-13.6zM15.6 15.6 21 21',
+    copy: 'M9 9h10.5v11.5H9zM15 5H4.5v10',
+    refresh: 'M20 12a8 8 0 1 1-2.4-5.7M20.4 3.6v4.2h-4.2',
+    clock: 'M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM12 7.8v4.6l3.1 2'
+  };
+
+  function iconSvg(name) {
+    var d = ICONS[name];
+    if (!d) return '';
+    return '<svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"/></svg>';
+  }
+
+  function hydrateIcons(root) {
+    var scope = root || document;
+    var nodes = scope.querySelectorAll('[data-icon]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.firstElementChild) continue;
+      el.innerHTML = iconSvg(el.getAttribute('data-icon'));
+    }
+  }
+
+  /* hydrateIcons leaves a filled slot alone, so swapping one is explicit */
+  function setIcon(el, name) {
+    if (!el) return;
+    el.setAttribute('data-icon', name);
+    el.innerHTML = iconSvg(name);
+  }
+
+  /* ─── small helpers ─────────────────────────────────────── */
+  var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function pad(n, w) { var s = String(Math.floor(n)); while (s.length < (w || 2)) s = '0' + s; return s; }
+  function mmss(ms) { var t = Math.max(0, Math.floor(ms / 1000)); return pad(t / 60) + ':' + pad(t % 60); }
+  function srtTime(ms) {
+    var t = Math.max(0, Math.floor(ms));
+    return pad(t / 3600000) + ':' + pad((t / 60000) % 60) + ':' + pad((t / 1000) % 60) + ',' + pad(t % 1000, 3);
+  }
+  function vttTime(ms) { return srtTime(ms).replace(',', '.'); }
+  function assTime(ms) {
+    var t = Math.max(0, Math.floor(ms));
+    return Math.floor(t / 3600000) + ':' + pad((t / 60000) % 60) + ':' + pad((t / 1000) % 60) + '.' + pad((t % 1000) / 10);
+  }
+
+  var LANGS = [
+    { c: 'en', n: 'English' }, { c: 'zh', n: 'Chinese (Simplified)' }, { c: 'zh-Hant', n: 'Chinese (Traditional)' },
+    { c: 'ja', n: 'Japanese' }, { c: 'ko', n: 'Korean' }, { c: 'de', n: 'German' },
+    { c: 'es', n: 'Spanish' }, { c: 'fr', n: 'French' }
+  ];
+  function langName(c) {
+    for (var i = 0; i < LANGS.length; i++) if (LANGS[i].c === c) return LANGS[i].n;
+    return c;
+  }
+  function fillLangs(sel, value) {
+    sel.innerHTML = LANGS.map(function (l) { return '<option value="' + l.c + '">' + esc(l.n) + '</option>'; }).join('');
+    sel.value = value;
+  }
+
+  var SOURCES = {
+    system: { label: 'This Mac', items: ['All system output', 'Chrome · current tab', 'Zoom Meetings', 'QuickTime Player'] },
+    mic: { label: 'Microphone', items: ['MacBook Pro Microphone', 'AirPods Pro', 'Scarlett Solo USB'] },
+    screen: { label: 'Screen region', items: ['Selected region · 1280×180', 'Full screen', 'Chrome window'] }
+  };
+
+  /* ─── content ───────────────────────────────────────────── */
+  var LIVE_SCRIPT = [
+    { en: 'Good morning, and thanks for staying through the last session of the day.',
+      zh: '大家早上好，感谢各位坚持到今天的最后一场。' },
+    { en: 'I want to talk about how we cut [[end-to-end latency]] in our captioning pipeline.',
+      zh: '我想聊聊我们是怎么把字幕流水线的[[端到端延迟]]降下来的。' },
+    { en: 'When we started, one sentence took almost four seconds to reach the viewer.',
+      zh: '刚开始的时候，一句话要将近四秒才能送到观众眼前。' },
+    { en: 'The bottleneck was never the model. It was everything standing around the model.',
+      zh: '瓶颈从来不是模型本身，而是围在模型周围的那一圈东西。' },
+    { en: 'So we moved to [[streaming inference]] with a two hundred millisecond window.',
+      zh: '于是我们换成了[[流式推理]]，窗口定在两百毫秒。' },
+    { en: 'That single change took us from four seconds down to about nine hundred.',
+      zh: '仅这一项改动，就把四秒压到了九百毫秒左右。' },
+    { en: 'The second problem was terminology: product names kept getting translated.',
+      zh: '第二个问题是术语：产品名老是被翻掉。' },
+    { en: 'So we pin those terms before the [[decoder]] ever sees them.',
+      zh: '所以我们在[[解码器]]看到它们之前，就先把这些词钉住。' },
+    { en: 'Reviewers went from rewriting every third line to approving most of the file.',
+      zh: '校对从每三行改一行，变成了整份文件基本直接通过。' },
+    { en: 'That is the whole talk. The rest is tuning, and I am happy to take questions.',
+      zh: '这就是全部内容了，剩下的都是调参，欢迎提问。' }
+  ];
+
+  function seg(inMs, outMs, orig, trans) {
+    return { in: inMs, out: outMs, orig: orig, trans: trans, base: trans };
+  }
+
+  /* A finished track: every cue translated, inside the 17 cps and 42-character
+     limits, with readable gaps. What is still open belongs to the project, not
+     to the text, so a project marked done really is clean. */
+  var SRT_SEGMENTS = [
+    seg(2120, 6120, '凌晨四点，这条街才刚刚开始醒来。', 'At four in the morning, this street\nis only just waking up.'),
+    seg(6400, 9400, '老陈的摊子是第一个亮灯的。', "Lao Chen's stall is the first one\nto light up."),
+    seg(9600, 13000, '他的卤水已经养了十九年。', 'His master stock has been going\nfor nineteen years.'),
+    seg(13240, 16440, '「每天只添，不换。」', '"You only ever top it up.\nYou never replace it."'),
+    seg(16700, 21200, '一锅卤水，就是一本账。', 'A pot of master stock is a ledger\nof everything that has gone into it.'),
+    seg(21500, 25500, '天亮之前，第一笼包子上桌。', 'Before sunrise, the first basket\nof buns reaches the table.'),
+    seg(25700, 28500, '客人大多不说话。', 'Most of the customers\ndo not say a word.'),
+    seg(28740, 31340, '他们只是坐下，然后开始吃。', 'They simply sit down\nand start eating.'),
+    seg(31600, 35000, '老陈说，这就是他想要的声音。', 'Lao Chen says this is exactly\nthe sound he was after.'),
+    seg(35300, 38900, '六点一过，街口排起了长队。', 'After six, a queue forms\nall the way down the street.'),
+    seg(39100, 42700, '队伍里有刚下夜班的护士。', 'There are nurses in the queue\njust off the night shift.'),
+    seg(42900, 45700, '也有赶着上早课的学生。', 'And students on their way\nto an early class.'),
+    seg(45900, 49300, '他们点的东西几乎一样。', 'They order almost exactly\nthe same thing every time.'),
+    seg(49500, 53100, '一碗面，一个蛋，加两块钱的辣。', 'A bowl of noodles, an egg,\nand two yuan of spicy sauce.')
+  ];
+
+  /* Each project's own outstanding review work, applied to its copy of the
+     fixture once. Review completion is then a real count, and retranslating or
+     editing a cue moves it. */
+  var OPEN_CUES = {
+    p2: [
+      { i: 5, blank: true },
+      { i: 6, shiftOut: 200 },
+      { i: 9, blank: true },
+      { i: 12, unbreak: true },
+      { i: 13, shiftOut: -1400 }
+    ]
+  };
+
+  var TALK_SEGMENTS = LIVE_SCRIPT.map(function (l, i) {
+    var start = 4200 + i * 6400;
+    var plain = l.en.replace(/\[\[|\]\]/g, '');
+    var dur = Math.max(2200, Math.round(plain.length * 58));
+    return seg(start, start + dur, plain, l.zh.replace(/\[\[|\]\]/g, ''));
+  });
+
+  /* Glossary is global. A term either applies everywhere ('all') or is tied
+     to one project by its id. */
+  var GLOSSARY = [
+    { id: 'g1', term: 'end-to-end latency', target: '端到端延迟', rule: 'prefer', scope: 'all', hits: 34 },
+    { id: 'g2', term: 'streaming inference', target: '流式推理', rule: 'prefer', scope: 'all', hits: 21 },
+    { id: 'g3', term: 'Taurus', target: '', rule: 'keep', scope: 'all', hits: 58 },
+    { id: 'g4', term: 'decoder', target: '解码器', rule: 'prefer', scope: 'p1', hits: 12 },
+    { id: 'g5', term: 'latency', target: '延时', rule: 'forbid', scope: 'p1', hits: 7 },
+    { id: 'g6', term: '老陈', target: 'Lao Chen', rule: 'prefer', scope: 'p2', hits: 19 },
+    { id: 'g7', term: '卤水', target: 'master stock', rule: 'prefer', scope: 'p2', hits: 11 },
+    { id: 'g8', term: '辣', target: 'chilli', rule: 'prefer', scope: 'p2', hits: 6 },
+    { id: 'g9', term: '辣', target: 'spicy', rule: 'forbid', scope: 'p2', hits: 3 }
+  ];
+
+  /* One track, one project. kind describes where the track came from. */
+  var KINDS = {
+    video:    { label: 'Video', icon: 'film' },
+    audio:    { label: 'Captured audio', icon: 'waveform' },
+    subtitle: { label: 'Imported subtitles', icon: 'captions' }
+  };
+
+  var PROJECTS = [
+    { id: 'p1', kind: 'audio', name: 'Streaming at Scale, closing keynote', when: 'Today, 09:42',
+      source: 'This Mac · all system output', status: 'done', from: 'en', to: 'zh', src: 'talk',
+      exports: [{ when: 'Today, 10:06', format: 'srt', layout: 'Stacked bilingual', cues: 10, how: 'file' }] },
+    { id: 'p2', kind: 'subtitle', name: 'Night Market Kitchen, episode 3', when: 'Today, 08:15',
+      source: 'night-market-kitchen-e03.zh.srt', status: 'review', from: 'zh', to: 'en', src: 'srt', exports: [] },
+    { id: 'p3', kind: 'video', name: 'Quarterly product demo', when: 'Yesterday, 17:30',
+      source: 'quarterly-product-demo.mp4', status: 'working', from: 'en', to: 'zh', src: 'talk',
+      progress: 60, exports: [] },
+    { id: 'p4', kind: 'subtitle', name: 'Rail safety briefing', when: 'Yesterday, 11:02',
+      source: 'rail-safety-briefing.de.vtt', status: 'done', from: 'de', to: 'en', src: 'srt',
+      exports: [{ when: 'Yesterday, 11:48', format: 'vtt', layout: 'Translation only', cues: 14, how: 'file' }] },
+    { id: 'p5', kind: 'audio', name: 'Team standup', when: 'Monday, 10:05',
+      source: 'AirPods Pro', status: 'failed', from: 'en', to: 'zh', src: 'talk',
+      error: 'Microphone disconnected 2 minutes in', exports: [] },
+    { id: 'p6', kind: 'subtitle', name: 'Kitchen Tour, episode 12', when: 'Saturday, 20:41',
+      source: 'kitchen-tour-e12.ja.ass', status: 'done', from: 'ja', to: 'zh', src: 'srt', exports: [] }
+  ];
+
+  var STATUS = {
+    done: 'Done', review: 'Needs review', working: 'Translating', failed: 'Failed', live: 'Recording'
+  };
+
+  /* ─── state ─────────────────────────────────────────────── */
+  var state = {
+    view: 'projects',
+    projectId: 'p2',
+    live: { status: 'idle', source: 'system', detail: SOURCES.system.items[0], from: 'en', to: 'zh',
+            provisional: true, terms: true, line: 0, p: 0, words: 0, termHits: 0, latency: 0,
+            startedAt: null, elapsed: 0, offset: 0, t0: 0, projectId: null, hits: {} },
+    pj: { q: '', filter: 'all' },
+    editor: { active: -1, filter: 'all', picked: {} },
+    extract: { step: 1, file: null, track: 'sub-en', from: 'en', to: 'zh', projectId: null },
+    gl: { q: '', scope: 'all', editing: null },
+    exp: { format: 'srt', layout: 'stacked', wrap: 42, merge: false, skipFlagged: false, bom: true }
+  };
+
+  function projectById(id) {
+    for (var i = 0; i < PROJECTS.length; i++) if (PROJECTS[i].id === id) return PROJECTS[i];
+    return null;
+  }
+  function currentProject() { return projectById(state.projectId); }
+
+  /* The project being recorded into right now, which is not necessarily the
+     one open in the editor. */
+  function liveProject() { return projectById(state.live.projectId); }
+
+  /* Real milliseconds of capture, pauses excluded, so cue timecodes are not
+     quantized to the one-second display clock. */
+  function liveMs() {
+    return state.live.status === 'running'
+      ? state.live.offset + (Date.now() - state.live.t0)
+      : state.live.offset;
+  }
+
+  /* Segments belong to the project and are materialized once, so the list,
+     the editor and the export screen are reading the same rows. */
+  function segsFor(p) {
+    if (!p || p.status === 'failed') return [];
+    if (!p.segs) {
+      var base = p.src === 'srt' ? SRT_SEGMENTS : TALK_SEGMENTS;
+      p.segs = base.map(function (s) {
+        return { in: s.in, out: s.out, orig: s.orig, trans: s.trans, base: s.base };
+      });
+      openThisProject(p, p.segs);
+    }
+    return p.segs;
+  }
+  function currentSegs() { return segsFor(currentProject()); }
+
+  /* A project still translating has nothing past the engine's position; an
+     imported file has whatever its own review list says is open. */
+  function openThisProject(p, segs) {
+    if (p.status === 'working') {
+      var reached = Math.round(segs.length * (p.progress || 0) / 100);
+      segs.forEach(function (s, i) { if (i >= reached) s.trans = ''; });
+      return;
+    }
+    (OPEN_CUES[p.id] || []).forEach(function (o) {
+      var s = segs[o.i];
+      if (!s) return;
+      if (o.blank) s.trans = '';
+      if (o.unbreak) s.trans = s.trans.replace(/\n/g, ' ');
+      if (o.shiftOut) s.out = s.out + o.shiftOut;
+    });
+  }
+
+  /* Needs review and Done are two readings of one number, so the pill, the
+     Projects list and the context bar can never disagree. */
+  function settleStatus(p) {
+    if (!p || p.status === 'failed' || p.status === 'live') return;
+    var flagged = projectStats(p).flagged;
+    if (p.status === 'working') {
+      if (flagged) return;
+      p.status = 'done';
+      return;
+    }
+    p.status = flagged ? 'review' : 'done';
+  }
+
+  /* Length, segment count and flag count always come from the segments
+     themselves, so the project list never contradicts the editor. */
+  function projectStats(p) {
+    var segs = segsFor(p);
+    var last = segs[segs.length - 1];
+    var flagged = 0;
+    segs.forEach(function (s, i) {
+      if (isFlagged(flagsFor(segs, i, p.id))) flagged++;
+    });
+    return { count: segs.length, len: segs.length ? mmss(last.out) : '–', flagged: flagged };
+  }
+
+  /* Review completion for the whole track: cues that carry no outstanding
+     check, over every cue in the project. */
+  function reviewProgress(p) {
+    var stats = projectStats(p);
+    var clear = stats.count - stats.flagged;
+    return {
+      count: stats.count,
+      open: stats.flagged,
+      clear: clear,
+      pct: stats.count ? Math.round(clear / stats.count * 100) : 0
+    };
+  }
+  function kindOf(p) { return KINDS[p && p.kind] || KINDS.subtitle; }
+
+  /* A track still being captured is as long as the capture has run, not as
+     long as its last committed cue. */
+  function trackLen(p) {
+    if (p.status === 'live') return mmss(liveMs());
+    return projectStats(p).len;
+  }
+  function projectMeta(p) {
+    if (!p) return '';
+    return kindOf(p).label + ' · ' + trackLen(p) + ' · ' + p.from + ' → ' + p.to;
+  }
+  function fileStem(p) {
+    return String(p.name).trim().replace(/[^\w\u00C0-\uFFFF.-]+/g, '-').replace(/^-+|-+$/g, '') || 'subtitles';
+  }
+  function scopeLabel(scope) {
+    if (scope === 'all') return 'Every project';
+    var p = projectById(scope);
+    return p ? p.name : 'Project removed';
+  }
+  function fillScopeSelect(sel, value) {
+    sel.innerHTML = '<option value="all">Every project</option>' +
+      PROJECTS.map(function (p) { return '<option value="' + p.id + '">' + esc(p.name) + '</option>'; }).join('');
+    sel.value = (value === 'all' || projectById(value)) ? value : 'all';
+  }
+
+  /* ─── toasts ────────────────────────────────────────────── */
+  function toast(msg, opts) {
+    opts = opts || {};
+    var region = $('#toasts');
+    if (!region) return;
+    var el = document.createElement('div');
+    el.className = 'toast';
+    el.setAttribute('data-t', opts.type || 'ok');
+    var mark = document.createElement('span');
+    mark.className = 'toast-mark';
+    mark.innerHTML = iconSvg(opts.type === 'bad' || opts.type === 'warn' ? 'alert' : 'check');
+    var text = document.createElement('span');
+    text.className = 'toast-msg';
+    text.textContent = msg;
+    el.appendChild(mark);
+    el.appendChild(text);
+
+    var timer = null;
+    function close() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      el.classList.add('is-out');
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 180);
+    }
+    if (opts.action) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'toast-act';
+      btn.textContent = opts.action.label;
+      btn.addEventListener('click', function () { close(); opts.action.run(); });
+      el.appendChild(btn);
+    }
+    region.appendChild(el);
+    timer = setTimeout(close, opts.action ? 7000 : 4200);
+  }
+
+  /* ─── dialogs ───────────────────────────────────────────── */
+  var dlgReturn = null;
+  function openDlg(dlg, focusSel) {
+    if (!dlg || typeof dlg.showModal !== 'function') return;
+    dlgReturn = document.activeElement;
+    dlg.showModal();
+    var target = focusSel ? $(focusSel, dlg) : $('.btn-primary, .btn-danger', dlg);
+    if (target) target.focus();
+  }
+  function restoreFocus() {
+    var el = dlgReturn;
+    dlgReturn = null;
+    if (el && document.contains(el) && el.offsetParent !== null && !el.disabled) { el.focus(); return; }
+    var fallback = $('#view-' + state.view + ' .btn-primary');
+    if (fallback) fallback.focus();
+  }
+
+  var confirmRun = null;
+  function askConfirm(o) {
+    $('#dlg-confirm-title').textContent = o.title;
+    $('#dlg-confirm-text').textContent = o.text;
+    $('#dlg-confirm-ok').textContent = o.okLabel || 'Delete';
+    confirmRun = o.run;
+    openDlg($('#dlg-confirm'), '#dlg-confirm-ok');
+  }
+
+  /* ─── routing ───────────────────────────────────────────── */
+  var VIEWS = ['live', 'projects', 'editor', 'extract', 'glossary', 'export'];
+  function showView(name) {
+    if (VIEWS.indexOf(name) === -1) return;
+    state.view = name;
+    VIEWS.forEach(function (v) {
+      var el = document.getElementById('view-' + v);
+      if (el) el.hidden = v !== name;
+    });
+    $$('[data-nav]').forEach(function (b) {
+      if (b.getAttribute('data-nav') === name) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+    if (name === 'projects') {
+      renderProjects();
+      /* Coming back from a long track, the open project should not be below
+         the fold. Only on entry: re-render runs on every live tick. */
+      var marked = $('#projlist .proj[aria-current="true"]');
+      if (marked) marked.scrollIntoView({ block: 'nearest' });
+    }
+    if (name === 'editor') renderEditor();
+    if (name === 'glossary') renderGlossary();
+    if (name === 'export') renderExport();
+    var h = $('#view-' + name + ' .view-title');
+    if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
+  }
+
+  /* ═══════════════ LIVE ═══════════════ */
+  function tokenize(str, cjk) {
+    var toks = [];
+    String(str).split(/(\[\[[^\]]+\]\])/).forEach(function (part) {
+      if (!part) return;
+      if (part.indexOf('[[') === 0) {
+        toks.push({ t: part.slice(2, -2), term: true });
+      } else if (cjk) {
+        part.split('').forEach(function (ch) { toks.push({ t: ch, term: false }); });
+      } else {
+        part.split(/\s+/).forEach(function (w) { if (w) toks.push({ t: w, term: false }); });
+      }
+    });
+    return toks;
+  }
+  function wrapTok(tok, prov) {
+    var cls = [];
+    if (tok.term) cls.push('term');
+    if (prov) cls.push('provisional');
+    return cls.length ? '<span class="' + cls.join(' ') + '">' + esc(tok.t) + '</span>' : esc(tok.t);
+  }
+  function renderTokens(toks, n, cjk, allowProvisional) {
+    var sep = cjk ? '' : ' ';
+    var out = [];
+    for (var i = 0; i < Math.min(n, toks.length); i++) out.push(wrapTok(toks[i], false));
+    var html = out.join(sep);
+    if (allowProvisional && state.live.provisional && n < toks.length) {
+      html += (html ? sep : '') + wrapTok(toks[n], true);
+    }
+    return html;
+  }
+
+  var liveTimer = null, clockTimer = null, currentLine = null;
+
+  function scriptLine(i) {
+    var l = LIVE_SCRIPT[i % LIVE_SCRIPT.length];
+    var toEn = state.live.to.indexOf('zh') === -1;
+    return {
+      origToks: tokenize(toEn ? l.zh : l.en, toEn),
+      transToks: tokenize(toEn ? l.en : l.zh, !toEn),
+      origCjk: toEn,
+      transCjk: !toEn,
+      words: l.en.replace(/\[\[|\]\]/g, '').split(/\s+/).length
+    };
+  }
+
+  function setLiveStatus(s) {
+    state.live.status = s;
+    var chip = $('#live-status');
+    chip.setAttribute('data-state', s === 'running' ? 'live' : s === 'paused' ? 'paused' : 'idle');
+    $('#live-status-text').textContent = s === 'running' ? 'Live · captioning' : s === 'paused' ? 'Paused' : 'Idle';
+    $('#vu').classList.toggle('is-live', s === 'running');
+    $('#nav-dot').hidden = s !== 'running';
+    $('#live-start').disabled = s === 'running';
+    $('#live-start').innerHTML = iconSvg('play') + (s === 'paused' ? 'Resume' : 'Start captioning');
+    $('#live-pause').disabled = s !== 'running';
+    $('#live-stop').disabled = s === 'idle';
+    $('#live-discard').disabled = !liveProject();
+    $$('#view-live .sourcebar select, #view-live .seg, #live-swap').forEach(function (el) {
+      el.disabled = s !== 'idle';
+    });
+    renderLiveBar();
+  }
+
+  function startLive() {
+    if (state.live.status === 'running') return;
+    if (state.live.status === 'idle') {
+      state.live.words = 0;
+      state.live.termHits = 0;
+      state.live.hits = {};
+      state.live.elapsed = 0;
+      state.live.offset = 0;
+      state.live.line = 0;
+      state.live.p = 0;
+      state.live.startedAt = new Date();
+      $('#transcript-list').innerHTML = '';
+      $('#kv-started').textContent = state.live.startedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      currentLine = scriptLine(0);
+      renderTermHits();
+      startCaptureProject();
+      if (['en>zh', 'zh>en'].indexOf(state.live.from + '>' + state.live.to) === -1) {
+        toast('The sample transcript only carries English and Chinese, so other pairs reuse those lines.', { type: 'warn' });
+      }
+    }
+    state.live.t0 = Date.now();
+    $('#live-empty').hidden = true;
+    $('#live-line').hidden = false;
+    $('#overlay-preview').hidden = false;
+    setLiveStatus('running');
+    refreshLiveTargets();
+    liveTimer = setInterval(tick, 120);
+    clockTimer = setInterval(function () {
+      state.live.elapsed = liveMs();
+      $('#m-elapsed').textContent = mmss(state.live.elapsed);
+      var mins = state.live.elapsed / 60000;
+      $('#m-wpm').textContent = mins > 0.15 ? String(Math.round(state.live.words / mins)) : '–';
+    }, 1000);
+  }
+
+  function pauseLive() {
+    if (state.live.status !== 'running') return;
+    state.live.offset = liveMs();
+    clearInterval(liveTimer); liveTimer = null;
+    clearInterval(clockTimer); clockTimer = null;
+    setLiveStatus('paused');
+    refreshLiveTargets();
+  }
+
+  /* Stopping only ends the capture. The project already exists and already
+     holds every committed line, so there is nothing left to decide here. */
+  function stopLive() {
+    if (state.live.status === 'idle') return;
+    state.live.offset = liveMs();
+    clearInterval(liveTimer); liveTimer = null;
+    clearInterval(clockTimer); clockTimer = null;
+    $('#live-line').hidden = true;
+
+    var p = liveProject();
+    state.live.projectId = null;
+    setLiveStatus('idle');
+    if (!p) { renderLiveBar(); return; }
+
+    var segs = p.segs;
+    var last = segs[segs.length - 1];
+    if (last) last.out = Math.max(last.in + 1200, state.live.offset);
+    p.status = 'review';
+    p.when = 'Just now';
+    settleStatus(p);
+    renderLiveBar();
+    renderProjects();
+
+    if (!segs.length) {
+      toast('“' + p.name + '” ended with nothing captured, so it sits empty in Projects.', {
+        type: 'warn', action: { label: 'Delete it', run: function () { deleteProject(p.id); } }
+      });
+      return;
+    }
+    var open = reviewProgress(p).open;
+    toast('“' + p.name + '” is in Projects · ' + segs.length + ' segments, ' +
+      (open ? open + ' needing review' : 'all clear') + '.', {
+      action: { label: 'Open', run: function () { openProject(p.id); } }
+    });
+  }
+
+  function tick() {
+    if (!currentLine) currentLine = scriptLine(state.live.line);
+    var steps = Math.max(8, currentLine.origToks.length);
+    state.live.p += 1 / steps;
+
+    var p = Math.min(1, state.live.p);
+    var oN = Math.floor(p * currentLine.origToks.length);
+    var tP = Math.max(0, (p - 0.3) / 0.7);
+    var tN = Math.floor(tP * currentLine.transToks.length);
+
+    $('#live-line-time').textContent = mmss(liveMs());
+    $('#live-line-orig').innerHTML = renderTokens(currentLine.origToks, oN, currentLine.origCjk, true);
+    $('#live-line-trans').innerHTML = renderTokens(currentLine.transToks, tN, currentLine.transCjk, true);
+    $('#ov-orig').innerHTML = $('#live-line-orig').innerHTML || '…';
+    $('#ov-trans').innerHTML = $('#live-line-trans').innerHTML || '…';
+
+    if (state.live.p >= 1) commitLine();
+    autoScroll();
+  }
+
+  function commitLine() {
+    var line = currentLine;
+    var origHtml = renderTokens(line.origToks, line.origToks.length, line.origCjk, false);
+    var transHtml = renderTokens(line.transToks, line.transToks.length, line.transCjk, false);
+    var at = liveMs();
+    var time = mmss(at);
+    var latency = 840 + Math.floor(Math.random() * 300);
+
+    state.live.latency = latency;
+    state.live.words += line.words;
+    line.transToks.forEach(function (t) {
+      if (!t.term) return;
+      state.live.termHits += 1;
+      state.live.hits[t.t] = (state.live.hits[t.t] || 0) + 1;
+    });
+    appendCapturedSegment(line, at);
+
+    var li = document.createElement('div');
+    li.className = 'seg-line';
+    li.innerHTML =
+      '<span class="seg-time mono">' + esc(time) + '</span>' +
+      '<div class="seg-texts">' +
+        '<p class="line-orig">' + origHtml + '</p>' +
+        '<p class="line-trans">' + transHtml + '</p>' +
+        '<div class="seg-meta"><span>' + latency + ' ms</span><span>' + line.words + ' words</span></div>' +
+      '</div>';
+    $('#transcript-list').appendChild(li);
+
+    $('#m-latency').textContent = String(latency);
+    $('#m-terms').textContent = String(state.live.termHits);
+    renderTermHits();
+
+    state.live.line += 1;
+    state.live.p = 0;
+    currentLine = scriptLine(state.live.line);
+  }
+
+  /* Each settled line is written into the project as it commits, so the
+     duration, segment count and progress shown anywhere in the app are the
+     live truth rather than a snapshot taken at the end. */
+  function appendCapturedSegment(line, at) {
+    var p = liveProject();
+    if (!p) return;
+    var orig = line.origToks.map(function (t) { return t.t; }).join(line.origCjk ? '' : ' ');
+    var trans = line.transToks.map(function (t) { return t.t; }).join(line.transCjk ? '' : ' ');
+    var prev = p.segs[p.segs.length - 1];
+    /* 200ms of air before the next cue, so a capture never arrives with a
+       tight-gap flag on every line it heard. */
+    if (prev) prev.out = Math.max(prev.in + 400, at - 200);
+    p.segs.push({ in: at, out: at + 2600, orig: orig, trans: trans, base: trans });
+    refreshLiveTargets();
+  }
+
+  /* Everything that quotes this project refreshes as it grows, without
+     stealing focus from a control the user is working in. */
+  function refreshLiveTargets() {
+    var p = liveProject();
+    if (!p) return;
+    renderProjectProgress('lv', p);
+    var list = $('#projlist');
+    if (state.view === 'projects' && list && !list.contains(document.activeElement)) renderProjects();
+    var ed = $('#view-editor');
+    if (state.view === 'editor' && state.projectId === p.id && ed && !ed.contains(document.activeElement)) {
+      renderEditor();
+    }
+  }
+
+  function autoScroll() {
+    var box = $('#transcript');
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 160) box.scrollTop = box.scrollHeight;
+  }
+
+  function renderTermHits() {
+    var list = $('#term-hits');
+    var keys = Object.keys(state.live.hits);
+    list.innerHTML = keys.map(function (k) {
+      var source = '';
+      for (var i = 0; i < GLOSSARY.length; i++) if (GLOSSARY[i].target === k) source = GLOSSARY[i].term;
+      return '<li class="term-row"><span class="term-src od-truncate">' + esc(source || '–') + '</span>' +
+        '<span class="term-arrow">→</span><span class="term-dst od-truncate">' + esc(k) + '</span>' +
+        '<span class="term-n">×' + state.live.hits[k] + '</span></li>';
+    }).join('');
+    $('#term-hits-empty').hidden = keys.length > 0;
+  }
+
+  function refreshSourceUi() {
+    var src = SOURCES[state.live.source];
+    var sel = $('#source-detail');
+    sel.innerHTML = src.items.map(function (i) { return '<option>' + esc(i) + '</option>'; }).join('');
+    sel.value = src.items.indexOf(state.live.detail) >= 0 ? state.live.detail : src.items[0];
+    state.live.detail = sel.value;
+    var label = src.label + ' · ' + state.live.detail;
+    $('#kv-source').textContent = label;
+    $('#vu-source').textContent = label;
+    $('#kv-pair').textContent = langName(state.live.from) + ' → ' + langName(state.live.to);
+  }
+
+  function buildVu() {
+    var vu = $('#vu');
+    var html = '';
+    for (var i = 0; i < 14; i++) html += '<span></span>';
+    vu.innerHTML = html;
+    $$('span', vu).forEach(function (bar, i) {
+      bar.style.animationDelay = ((i * 83) % 560) + 'ms';
+      bar.style.animationDuration = (680 + (i % 5) * 70) + 'ms';
+    });
+  }
+
+  /* A sound track is a project from its first second: pressing Start creates
+     the project that will hold it, so a capture has no unsaved state and there
+     is nothing to lose by forgetting a button. */
+  function startCaptureProject() {
+    var d = new Date();
+    var src = SOURCES[state.live.source];
+    var p = {
+      id: 'p-' + Date.now(),
+      kind: 'audio',
+      name: src.label + ' · ' + d.toLocaleDateString([], { day: 'numeric', month: 'short' }) +
+        ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      when: 'Just now', status: 'live',
+      source: src.label + ' · ' + state.live.detail,
+      from: state.live.from, to: state.live.to, src: 'talk', segs: [], exports: []
+    };
+    PROJECTS.unshift(p);
+    state.live.projectId = p.id;
+    renderLiveBar();
+    toast('Recording into “' + p.name + '”.', {
+      action: { label: 'Rename', run: function () { openRenameDialog(p.id); } }
+    });
+  }
+
+  /* The live screen carries the same project bar as the editor and export
+     screens, reading the project being recorded into rather than the one open
+     in the editor. */
+  function renderLiveBar() {
+    var p = liveProject();
+    renderProjectBar('lv', p);
+    $('#lv-rename').disabled = !p;
+    $('#lv-open').disabled = !p;
+  }
+
+  var renameTarget = null;
+
+  function openRenameDialog(id) {
+    var p = projectById(id) || liveProject();
+    if (!p) return;
+    renameTarget = p.id;
+    $('#s-name').value = p.name;
+    $('#s-name-err').hidden = true;
+    $('#s-name').classList.remove('is-bad');
+    var n = segsFor(p).length;
+    $('#dlg-rename-note').textContent = kindOf(p).label + ' · ' + p.source + ' · ' +
+      (n ? n + (n === 1 ? ' segment' : ' segments') : 'nothing captured yet') +
+      ' · ' + langName(p.from) + ' → ' + langName(p.to) + '.';
+    openDlg($('#dlg-rename'), '#s-name');
+  }
+
+  function renameProject() {
+    var p = projectById(renameTarget);
+    if (!p) { $('#dlg-rename').close(); return; }
+    var name = $('#s-name').value.trim();
+    if (!name) {
+      $('#s-name').classList.add('is-bad');
+      var err = $('#s-name-err');
+      err.hidden = false;
+      err.textContent = 'Name the project so you can find this track again.';
+      $('#s-name').focus();
+      return;
+    }
+    p.name = name;
+    renameTarget = null;
+    $('#dlg-rename').close();
+    renderLiveBar();
+    renderProjects();
+    renderGlossary();
+    if (state.view === 'editor') renderEditor();
+    if (state.view === 'export') renderExport();
+    toast('Renamed to “' + name + '”.');
+  }
+
+  /* Because the project exists from the first second, a three-second
+     accidental start needs a way out that leaves nothing behind. */
+  function discardCapture() {
+    var p = liveProject();
+    if (!p) return;
+    var n = p.segs.length;
+    askConfirm({
+      title: 'Discard this capture?',
+      text: '“' + p.name + '” is deleted along with ' + (n
+        ? 'the ' + n + (n === 1 ? ' segment' : ' segments') + ' captured so far'
+        : 'the empty project holding it') + '. The capture stops.',
+      okLabel: 'Discard capture',
+      run: function () {
+        clearInterval(liveTimer); liveTimer = null;
+        clearInterval(clockTimer); clockTimer = null;
+        state.live.projectId = null;
+        var i = PROJECTS.indexOf(p);
+        if (i >= 0) PROJECTS.splice(i, 1);
+        var widened = 0;
+        GLOSSARY.forEach(function (g) { if (g.scope === p.id) { g.scope = 'all'; widened++; } });
+        if (state.gl.scope === p.id) state.gl.scope = 'all';
+        if (state.projectId === p.id) {
+          state.projectId = PROJECTS.length ? PROJECTS[0].id : null;
+          resetEditorView();
+        }
+
+        state.live.words = 0;
+        state.live.termHits = 0;
+        state.live.hits = {};
+        state.live.elapsed = 0;
+        state.live.offset = 0;
+        state.live.line = 0;
+        state.live.p = 0;
+        state.live.startedAt = null;
+        currentLine = null;
+        $('#transcript-list').innerHTML = '';
+        $('#live-line').hidden = true;
+        $('#overlay-preview').hidden = true;
+        $('#live-empty').hidden = false;
+        $('#m-elapsed').textContent = '00:00';
+        $('#m-latency').textContent = '–';
+        $('#m-wpm').textContent = '–';
+        $('#m-terms').textContent = '0';
+        $('#kv-started').textContent = 'Not started';
+        renderTermHits();
+        setLiveStatus('idle');
+        renderLiveBar();
+        renderProjects();
+        renderGlossary();
+        var start = $('#live-start');
+        if (start) start.focus();
+        toast('Discarded the capture. Nothing was kept.' + (widened
+          ? ' ' + widened + (widened === 1 ? ' glossary term now applies' : ' glossary terms now apply') + ' to every project.'
+          : ''));
+      }
+    });
+  }
+
+  /* ═══════════════ PROJECTS ═══════════════ */
+  var PJ_FILTERS = [
+    { k: 'all', label: 'All' }, { k: 'video', label: 'Video' }, { k: 'audio', label: 'Captured' },
+    { k: 'subtitle', label: 'Imported' }, { k: 'review', label: 'Needs review' },
+    { k: 'done', label: 'Done' }, { k: 'failed', label: 'Failed' }
+  ];
+
+  function projectMatches(p) {
+    var f = state.pj.filter;
+    if (f !== 'all' && f !== p.kind && f !== p.status) return false;
+    var q = state.pj.q.trim().toLowerCase();
+    if (!q) return true;
+    return (p.name + ' ' + p.source + ' ' + kindOf(p).label + ' ' + langName(p.from) + ' ' +
+      langName(p.to) + ' ' + STATUS[p.status]).toLowerCase().indexOf(q) >= 0;
+  }
+
+  function countFor(k) {
+    return PROJECTS.filter(function (p) { return k === 'all' || k === p.kind || k === p.status; }).length;
+  }
+
+  function renderPjFilters() {
+    $('#pj-filters').innerHTML = PJ_FILTERS.map(function (f) {
+      var n = countFor(f.k);
+      return '<button class="chip' + (state.pj.filter === f.k ? ' is-on' : '') + '" type="button" ' +
+        'data-pj-filter="' + f.k + '" aria-pressed="' + (state.pj.filter === f.k) + '">' +
+        esc(f.label) + ' <span class="chip-num">' + n + '</span></button>';
+    }).join('');
+  }
+
+  /* The list and the editor's context bar quote the same percentage, so the
+     two screens can never tell you different things about one project. */
+  function progressCell(p) {
+    if (p.status === 'failed') return '<span class="data-cell od-truncate">' + esc(p.error || 'Failed') + '</span>';
+    if (p.status === 'live') {
+      var n = segsFor(p).length;
+      var held = state.live.projectId === p.id && state.live.status === 'paused';
+      return '<span class="od-field"><span class="data-cell">' +
+        (n ? n + (n === 1 ? ' segment' : ' segments') : 'nothing yet') +
+        (held ? ' · paused' : ' · recording') + '</span>' +
+        (held ? '' : '<span class="bar is-live"><span class="bar-fill"></span></span>') + '</span>';
+    }
+    var r = reviewProgress(p);
+    var pct = r.pct;
+    var label = r.pct + '% reviewed';
+    if (p.status === 'working') {
+      var open = segsFor(p).filter(function (s) { return !String(s.trans).trim(); }).length;
+      pct = r.count ? Math.round((r.count - open) / r.count * 100) : 0;
+      label = pct + '% translated';
+    }
+    return '<span class="od-field"><span class="data-cell">' + label + '</span>' +
+      '<span class="bar"><span class="bar-fill" style="width:' + pct + '%"></span></span></span>';
+  }
+
+  function renderProjects() {
+    PROJECTS.forEach(function (p) { settleStatus(p); });
+    renderPjFilters();
+    var rows = PROJECTS.filter(projectMatches);
+    $('#projlist').innerHTML = rows.map(function (p) {
+      var stats = projectStats(p);
+      var kind = kindOf(p);
+      /* The track the editor and export screens are pointed at. Marked with a
+         word as well as the accent, so it does not read by colour alone. */
+      var here = p.id === state.projectId && p.status !== 'failed';
+      return '<li class="proj" data-proj="' + p.id + '"' + (here ? ' aria-current="true"' : '') + '>' +
+        '<span class="proj-main">' +
+          '<span class="proj-mark" data-kind="' + p.kind + '" data-icon="' + kind.icon + '"></span>' +
+          '<span class="od-field od-fill">' +
+            '<button class="proj-name" type="button" data-open="' + p.id + '" aria-label="' +
+              (here ? 'Return to ' : 'Open ') + esc(p.name) + ' in the editor">' + esc(p.name) + '</button>' +
+            '<span class="proj-when od-truncate">' + esc(kind.label) + ' · ' + esc(p.source) + ' · ' + esc(p.when) + '</span>' +
+          '</span>' +
+          (here ? '<span class="proj-here od-nowrap">Open</span>' : '') +
+        '</span>' +
+        '<span class="proj-status"><span class="pill" data-s="' + p.status + '"><span class="pill-dot"></span>' + STATUS[p.status] + '</span></span>' +
+        '<span class="data-cell proj-lang">' + p.from + ' → ' + (p.to === 'zh-Hant' ? 'zh‑t' : p.to) + '</span>' +
+        '<span class="data-cell proj-len">' + trackLen(p) + '</span>' +
+        '<span class="proj-seg">' + progressCell(p) + '</span>' +
+        '<span class="proj-meta-m"><span class="data-cell">' + p.from + ' → ' + p.to + '</span>' +
+          '<span class="data-cell">' + trackLen(p) + '</span>' +
+          '<span class="data-cell">' + stats.count + ' segments</span></span>' +
+        '<span class="proj-acts">' +
+          '<button class="btn btn-icon" type="button" data-open="' + p.id + '" aria-label="' +
+            (here ? 'Return to ' : 'Open ') + esc(p.name) + ' in the editor"><span data-icon="editor"></span></button>' +
+          '<button class="btn btn-icon" type="button" data-exp="' + p.id + '" aria-label="Export ' + esc(p.name) + '"><span data-icon="download"></span></button>' +
+          '<button class="btn btn-icon btn-danger-ghost" type="button" data-del="' + p.id + '" aria-label="Delete ' + esc(p.name) + '"><span data-icon="trash"></span></button>' +
+        '</span>' +
+      '</li>';
+    }).join('');
+    $('#pj-empty').hidden = rows.length > 0;
+    hydrateIcons($('#projlist'));
+  }
+
+  /* Deleting a project cannot quietly delete glossary work, so any term
+     tied to it widens to every project instead. */
+  function deleteProject(id) {
+    var p = projectById(id);
+    if (!p) return;
+    var stats = projectStats(p);
+    var tied = GLOSSARY.filter(function (g) { return g.scope === id; }).length;
+    var recording = state.live.projectId === id;
+    askConfirm({
+      title: 'Delete this project?',
+      text: '“' + p.name + '” loses its ' + stats.count + ' segments and its export history.' +
+        (recording ? ' The capture writing into it stops.' : '') + (tied
+        ? ' The ' + tied + (tied === 1 ? ' glossary term tied to it will apply' : ' glossary terms tied to it will apply') + ' to every project instead.'
+        : ''),
+      okLabel: 'Delete project',
+      run: function () {
+        if (recording) {
+          clearInterval(liveTimer); liveTimer = null;
+          clearInterval(clockTimer); clockTimer = null;
+          state.live.projectId = null;
+          $('#live-line').hidden = true;
+          setLiveStatus('idle');
+        }
+        var widened = 0;
+        GLOSSARY.forEach(function (g) { if (g.scope === id) { g.scope = 'all'; widened++; } });
+        PROJECTS.splice(PROJECTS.indexOf(p), 1);
+        if (state.projectId === id) state.projectId = PROJECTS.length ? PROJECTS[0].id : null;
+        if (state.gl.scope === id) state.gl.scope = 'all';
+        resetEditorView();
+        renderProjects();
+        renderGlossary();
+        var next = $('#projlist .proj-name');
+        if (next) next.focus(); else { var fallback = $('#view-projects .btn-primary'); if (fallback) fallback.focus(); }
+        toast('Deleted “' + p.name + '”.' + (widened
+          ? ' ' + widened + (widened === 1 ? ' glossary term now applies' : ' glossary terms now apply') + ' to every project.'
+          : ''));
+      }
+    });
+  }
+
+  /* ═══════════════ EDITOR ═══════════════ */
+  function activeGlossary(projectId) {
+    return GLOSSARY.filter(function (g) { return g.scope === 'all' || g.scope === projectId; });
+  }
+  function termsIn(text, scope) {
+    var list = [];
+    activeGlossary(scope).forEach(function (g) {
+      if (g.rule === 'forbid') return;
+      if (String(text).toLowerCase().indexOf(g.term.toLowerCase()) >= 0 && list.indexOf(g.term) === -1) list.push(g.term);
+    });
+    return list;
+  }
+
+  function flagsFor(segs, i, scope) {
+    var s = segs[i];
+    var dur = Math.max(0.1, (s.out - s.in) / 1000);
+    var text = String(s.trans).trim();
+    var out = [];
+    if (!text) {
+      out.push({ f: 'none', label: 'empty' });
+    } else {
+      var cps = text.length / dur;
+      if (cps > 17) out.push({ f: 'fast', label: Math.round(cps) + ' cps' });
+      var longest = 0;
+      text.split('\n').forEach(function (l) { longest = Math.max(longest, l.length); });
+      if (longest > 42) out.push({ f: 'long', label: longest + ' ch' });
+    }
+    var next = segs[i + 1];
+    if (next && next.in - s.out < 80) out.push({ f: 'gap', label: (next.in - s.out) + ' ms gap' });
+    var t = termsIn(s.orig, scope);
+    if (t.length) out.push({ f: 'term', label: t.length + (t.length === 1 ? ' term' : ' terms') });
+    if (!out.length) out.push({ f: 'ok', label: 'clean' });
+    return out;
+  }
+
+  function isFlagged(flags) {
+    return flags.some(function (f) { return f.f === 'fast' || f.f === 'long' || f.f === 'gap' || f.f === 'none'; });
+  }
+
+  var ED_FILTERS = [
+    { k: 'all', label: 'All' }, { k: 'flagged', label: 'Flagged' },
+    { k: 'empty', label: 'Untranslated' }, { k: 'term', label: 'Glossary hits' }
+  ];
+
+  function resetEditorView() {
+    state.editor.active = -1;
+    state.editor.picked = {};
+    state.editor.filter = 'all';
+  }
+
+  function openProject(id) {
+    var p = projectById(id);
+    if (!p) return;
+    if (p.status === 'failed') {
+      toast('“' + p.name + '” failed before any segment was written: ' + p.error.toLowerCase() + '.', { type: 'bad' });
+      return;
+    }
+    state.projectId = id;
+    resetEditorView();
+    showView('editor');
+  }
+
+  /* Both project-scoped screens carry the same bar: which track you are in,
+     a way back, and a switcher that does not go through Projects. */
+  function fillProjectSwitch(sel) {
+    var open = PROJECTS.filter(function (p) { return p.status !== 'failed'; });
+    sel.innerHTML = open.map(function (p) {
+      return '<option value="' + p.id + '">' + esc(p.name) + '</option>';
+    }).join('');
+    var cur = projectById(state.projectId);
+    if ((!cur || cur.status === 'failed') && open.length) state.projectId = open[0].id;
+    if (projectById(state.projectId)) sel.value = state.projectId;
+  }
+
+  /* What each bar says when it has no project to describe. */
+  var PB_EMPTY = {
+    lv: { name: 'No capture yet', kind: 'audio', icon: 'waveform',
+          meta: 'Press Start captioning and a project is created to hold the track.' },
+    ed: { name: 'No project open', kind: 'subtitle', icon: 'captions',
+          meta: 'Create one from a capture, a video or a subtitle file.' },
+    exp: { name: 'No project open', kind: 'subtitle', icon: 'captions',
+           meta: 'Create one from a capture, a video or a subtitle file.' }
+  };
+
+  function renderProjectBar(prefix, project) {
+    var p = arguments.length > 1 ? project : currentProject();
+    var mark = $('#' + prefix + '-pb-mark');
+    var sel = $('#' + prefix + '-project');
+    if (sel) fillProjectSwitch(sel);
+    if (!p) {
+      var empty = PB_EMPTY[prefix] || PB_EMPTY.ed;
+      setIcon(mark, empty.icon);
+      mark.setAttribute('data-kind', empty.kind);
+      $('#' + prefix + '-pb-name').textContent = empty.name;
+      $('#' + prefix + '-pb-meta').textContent = empty.meta;
+      renderProjectProgress(prefix, null);
+      return;
+    }
+    setIcon(mark, kindOf(p).icon);
+    mark.setAttribute('data-kind', p.kind);
+    $('#' + prefix + '-pb-name').textContent = p.name;
+    $('#' + prefix + '-pb-meta').textContent = projectMeta(p);
+    renderProjectProgress(prefix, p);
+  }
+
+  /* How far the whole track has got, not just the segment in front of you.
+     Cheap enough to run on every keystroke, so the bar moves while you edit. */
+  function renderProjectProgress(prefix, p) {
+    var box = $('#' + prefix + '-pb-prog');
+    var pill = $('#' + prefix + '-pb-status');
+    if (!box || !pill) return;
+    if (!p) {
+      box.hidden = true;
+      pill.hidden = true;
+      return;
+    }
+    settleStatus(p);
+    var r = reviewProgress(p);
+    var recording = p.status === 'live';
+    box.hidden = false;
+    $('#' + prefix + '-pb-prog-label').textContent = recording ? 'Reviewed so far' : 'Review complete';
+    $('#' + prefix + '-pb-prog-pct').textContent = r.pct + '%';
+    $('#' + prefix + '-pb-prog-fill').style.width = r.pct + '%';
+    $('#' + prefix + '-pb-prog-note').textContent = !r.count
+      ? (recording ? 'Nothing has settled yet' : 'No segments in this project yet')
+      : r.open
+        ? r.clear + ' of ' + r.count + ' segments clear, ' + r.open + ' open'
+        : 'All ' + r.count + (r.count === 1 ? ' segment clear' : ' segments clear');
+    box.setAttribute('data-state', recording ? 'recording' : r.count && !r.open ? 'clear' : 'open');
+    var gauge = $('#' + prefix + '-pb-prog-bar');
+    gauge.setAttribute('aria-valuenow', r.pct);
+    gauge.setAttribute('aria-valuetext', r.pct + '%, ' + r.clear + ' of ' + r.count + ' segments clear');
+    var label = STATUS[p.status];
+    if (recording && state.live.projectId === p.id && state.live.status === 'paused') label = 'Paused';
+    pill.hidden = false;
+    pill.setAttribute('data-s', p.status);
+    pill.innerHTML = '<span class="pill-dot"></span>' + label;
+  }
+
+  function refreshProjectProgress() {
+    var p = currentProject();
+    renderProjectProgress('ed', p);
+    renderProjectProgress('exp', p);
+  }
+
+  function visibleRows() {
+    var p = currentProject();
+    var scope = p ? p.id : null;
+    var segs = currentSegs();
+    var rows = [];
+    segs.forEach(function (s, i) {
+      var flags = flagsFor(segs, i, scope);
+      var keep = true;
+      if (state.editor.filter === 'flagged') keep = isFlagged(flags);
+      if (state.editor.filter === 'empty') keep = !String(s.trans).trim();
+      if (state.editor.filter === 'term') keep = flags.some(function (f) { return f.f === 'term'; });
+      if (keep) rows.push({ i: i, flags: flags });
+    });
+    return rows;
+  }
+
+  function flagsHtml(flags) {
+    return flags.map(function (f) {
+      return '<span class="flag" data-f="' + f.f + '">' + esc(f.label) + '</span>';
+    }).join('');
+  }
+
+  function renderEdFilters() {
+    var p = currentProject();
+    var scope = p ? p.id : null;
+    var segs = currentSegs();
+    var counts = { all: segs.length, flagged: 0, empty: 0, term: 0 };
+    segs.forEach(function (s, i) {
+      var f = flagsFor(segs, i, scope);
+      if (isFlagged(f)) counts.flagged++;
+      if (!String(s.trans).trim()) counts.empty++;
+      if (f.some(function (x) { return x.f === 'term'; })) counts.term++;
+    });
+    $('#ed-filters').innerHTML = ED_FILTERS.map(function (f) {
+      return '<button class="chip' + (state.editor.filter === f.k ? ' is-on' : '') + '" type="button" ' +
+        'data-ed-filter="' + f.k + '" aria-pressed="' + (state.editor.filter === f.k) + '">' +
+        esc(f.label) + ' <span class="chip-num">' + counts[f.k] + '</span></button>';
+    }).join('');
+  }
+
+  function renderEditor() {
+    renderProjectBar('ed');
+    var p = currentProject();
+    if (!p) {
+      $('#editor-sub').textContent = 'No project open. Pick one to edit its subtitles.';
+      $('#seglist').innerHTML = '';
+      $('#ed-filters').innerHTML = '';
+      $('#ed-empty-title').textContent = 'No project open';
+      $('#ed-empty-text').textContent = 'A project holds one track and its segments. Open one to start editing.';
+      $('#ed-show-all').hidden = true;
+      $('#ed-empty-go').hidden = false;
+      $('#ed-empty').hidden = false;
+      renderInspector();
+      return;
+    }
+    $('#ed-empty-title').textContent = 'Nothing to show';
+    $('#ed-empty-text').innerHTML = 'No segment matches this filter. Switch back to <strong>All</strong> to see the whole track.';
+    $('#ed-show-all').hidden = false;
+    $('#ed-empty-go').hidden = true;
+    var segs = currentSegs();
+    var stats = projectStats(p);
+    if (!segs.length && p.status === 'live') {
+      $('#ed-empty-title').textContent = 'Recording into this project';
+      $('#ed-empty-text').textContent = 'Each line lands here as it settles from provisional to committed. Nothing has settled yet.';
+      $('#ed-show-all').hidden = true;
+    }
+    $('#editor-sub').textContent = p.status === 'live'
+      ? 'Recording · ' + segs.length + ' segments so far, ' +
+        (stats.flagged ? stats.flagged + ' flagged for review' : 'none flagged') + '.'
+      : segs.length + ' segments, ' +
+        (stats.flagged ? stats.flagged + ' still flagged for review' : 'none flagged') + '.';
+    $('#ed-col-orig').textContent = 'Original · ' + p.from;
+    $('#ed-col-trans').textContent = 'Translation · ' + p.to;
+    renderEdFilters();
+
+    var rows = visibleRows();
+    $('#seglist').innerHTML = rows.map(function (r) {
+      var s = segs[r.i];
+      var dur = ((s.out - s.in) / 1000).toFixed(1);
+      return '<li class="seg-row' + (state.editor.active === r.i ? ' is-active' : '') +
+          (isFlagged(r.flags) ? ' is-flagged' : '') + '" data-row="' + r.i + '">' +
+        '<span class="seg-pick">' +
+          '<label class="check"><input type="checkbox" data-pick="' + r.i + '"' +
+            (state.editor.picked[r.i] ? ' checked' : '') +
+            ' aria-label="Select segment ' + (r.i + 1) + '"><span class="check-box" data-icon="check"></span></label>' +
+          '<span class="seg-idx mono">' + (r.i + 1) + '</span>' +
+        '</span>' +
+        '<span class="seg-tc">' +
+          '<span class="tc">' + srtTime(s.in) + '</span>' +
+          '<span class="tc-dur">' + dur + ' s · ' + srtTime(s.out).slice(3) + '</span>' +
+        '</span>' +
+        '<button class="seg-orig" type="button" data-row-focus="' + r.i + '">' + esc(s.orig) + '</button>' +
+        '<textarea class="seg-tr" rows="1" data-tr="' + r.i + '" aria-label="Translation for segment ' + (r.i + 1) + '"' +
+          ' placeholder="Not translated yet">' + esc(s.trans) + '</textarea>' +
+        '<span class="seg-flags">' + flagsHtml(r.flags) + '</span>' +
+      '</li>';
+    }).join('');
+    $('#ed-empty').hidden = rows.length > 0;
+    hydrateIcons($('#seglist'));
+    $$('#seglist .seg-tr').forEach(autosize);
+    updateSelectionUi();
+    renderInspector();
+  }
+
+  function autosize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.max(32, el.scrollHeight) + 'px';
+  }
+
+  function updateSelectionUi() {
+    var n = Object.keys(state.editor.picked).filter(function (k) { return state.editor.picked[k]; }).length;
+    var btn = $('#ed-retranslate');
+    btn.disabled = n === 0;
+    btn.innerHTML = iconSvg('refresh') + (n ? 'Retranslate ' + n + ' selected' : 'Retranslate selected');
+    $('#ed-clear-sel').disabled = n === 0;
+  }
+
+  function buildWave(activeRatio) {
+    var html = '';
+    for (var i = 0; i < 46; i++) {
+      var h = 0.18 + Math.abs(Math.sin(i * 1.7) * 0.55) + (i % 5) * 0.045;
+      var inWindow = activeRatio >= 0 && i >= Math.floor(activeRatio * 46) - 7 && i <= Math.floor(activeRatio * 46) + 7;
+      html += '<span class="' + (inWindow ? 'is-in' : '') + '" style="transform:scaleY(' + h.toFixed(2) + ')"></span>';
+    }
+    $('#insp-wave').innerHTML = html;
+  }
+
+  function renderInspector() {
+    var i = state.editor.active;
+    var segs = currentSegs();
+    var p = currentProject();
+    if (i < 0 || !segs[i]) {
+      buildWave(-1);
+      $('#insp-orig').textContent = 'Select a segment';
+      $('#insp-trans').textContent = '';
+      $('#insp-checks').innerHTML = '<li class="check-item" data-ok="yes"><span data-icon="check"></span>Pick a row to see how it reads on screen.</li>';
+      ['#insp-in', '#insp-out', '#insp-dur', '#insp-gap'].forEach(function (s) { $(s).textContent = '–'; });
+      $('#insp-retranslate').disabled = true;
+      hydrateIcons($('#insp-checks'));
+      return;
+    }
+    var s = segs[i];
+    var last = segs[segs.length - 1];
+    buildWave(s.in / Math.max(1, last.out));
+    $('#insp-orig').textContent = s.orig;
+    $('#insp-trans').textContent = s.trans || 'Not translated yet';
+    $('#insp-in').textContent = srtTime(s.in);
+    $('#insp-out').textContent = srtTime(s.out);
+    var dur = (s.out - s.in) / 1000;
+    $('#insp-dur').textContent = dur.toFixed(1) + ' s';
+    var next = segs[i + 1];
+    $('#insp-gap').textContent = next ? (next.in - s.out) + ' ms' : 'last cue';
+
+    var text = String(s.trans).trim();
+    var cps = text ? text.length / Math.max(0.1, dur) : 0;
+    var longest = 0;
+    text.split('\n').forEach(function (l) { longest = Math.max(longest, l.length); });
+    var terms = termsIn(s.orig, p ? p.id : null);
+    var checks = [
+      { ok: text.length > 0, text: text ? 'Translated' : 'Still empty, so nothing will show on screen.' },
+      { ok: cps <= 17, text: 'Reading speed <b>' + (text ? cps.toFixed(1) : '0') + ' cps</b>' + (cps > 17 ? ', over the 17 cps comfort limit.' : ', comfortable.') },
+      { ok: longest <= 42, text: 'Longest line <b>' + longest + ' ch</b>' + (longest > 42 ? ', so break it across two lines.' : '.') },
+      { ok: !next || next.in - s.out >= 80, text: next ? (next.in - s.out >= 80 ? 'Gap to next cue is readable.' : 'Only <b>' + (next.in - s.out) + ' ms</b> before the next cue.') : 'Last cue in the file.' }
+    ];
+    if (terms.length) checks.push({ ok: true, text: 'Glossary terms held: <b>' + esc(terms.join(', ')) + '</b>' });
+    $('#insp-checks').innerHTML = checks.map(function (c) {
+      return '<li class="check-item" data-ok="' + (c.ok ? 'yes' : 'no') + '">' +
+        '<span data-icon="' + (c.ok ? 'check' : 'alert') + '"></span><span>' + c.text + '</span></li>';
+    }).join('');
+    hydrateIcons($('#insp-checks'));
+    $('#insp-retranslate').disabled = false;
+  }
+
+  function applyRules(text, scope) {
+    var out = String(text);
+    var changed = 0;
+    activeGlossary(scope).forEach(function (g) {
+      if (g.rule !== 'forbid' || !g.target) return;
+      var prefer = null;
+      activeGlossary(scope).forEach(function (p) {
+        if (p.rule === 'prefer' && p.term === g.term && p.target) prefer = p.target;
+      });
+      if (!prefer) return;
+      var re = new RegExp(g.target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      if (re.test(out)) { out = out.replace(re, prefer); changed++; }
+    });
+    return { text: out, changed: changed };
+  }
+
+  function retranslate(indices) {
+    var p = currentProject();
+    var scope = p ? p.id : null;
+    var segs = currentSegs();
+    indices.forEach(function (i) {
+      var box = $('#seglist [data-tr="' + i + '"]');
+      if (box) { box.classList.add('is-loading'); box.readOnly = true; }
+    });
+    setTimeout(function () {
+      var filled = 0, fixed = 0;
+      indices.forEach(function (i) {
+        var s = segs[i];
+        if (!s) return;
+        var before = String(s.trans).trim();
+        var result = applyRules(s.base || s.trans, scope);
+        s.trans = result.text;
+        if (!before && result.text) filled++;
+        if (before && result.changed) fixed++;
+      });
+      state.editor.picked = {};
+      renderEditor();
+      var parts = [];
+      if (filled) parts.push(filled + (filled === 1 ? ' empty segment filled' : ' empty segments filled'));
+      if (fixed) parts.push(fixed + (fixed === 1 ? ' glossary conflict corrected' : ' glossary conflicts corrected'));
+      toast(parts.length ? parts.join(' · ') + '.' : 'No change: those lines already match the glossary.',
+        { type: parts.length ? 'ok' : 'warn' });
+    }, 720);
+  }
+
+  /* ═══════════════ EXTRACT ═══════════════ */
+  /* The sample file resolves to the same segment set the editor will load,
+     so every count the extract flow shows matches what arrives. */
+  function exBase() { return state.extract.to.indexOf('zh') === -1 ? SRT_SEGMENTS : TALK_SEGMENTS; }
+  function exCount() { return exBase().length; }
+  function exSpan() {
+    var b = exBase();
+    return srtTime(b[b.length - 1].out).slice(0, 8);
+  }
+  function exTracks() {
+    var n = exCount();
+    return [
+      { k: 'sub-en', title: 'Embedded subtitle track · English', sub: 'mov_text · ' + n + ' cues · ' + exSpan() },
+      { k: 'sub-zh', title: 'Embedded subtitle track · Chinese (Simplified)', sub: 'mov_text · ' + (n - 3) + ' cues · partial' },
+      { k: 'audio', title: 'Transcribe the audio track', sub: 'aac · 48 kHz stereo · slower, works on anything' }
+    ];
+  }
+  function exStages() {
+    var n = exCount();
+    return [
+      { label: 'Reading container', note: '0.4 s' },
+      { label: 'Decoding the chosen track', note: n + ' cues' },
+      { label: 'Re-timing and splitting long cues', note: n + ' cues' },
+      { label: 'Translating with the glossary', note: n + ' of ' + n }
+    ];
+  }
+
+  function exStep(n) {
+    state.extract.step = n;
+    $('#ex-step-1').hidden = n !== 1;
+    $('#ex-step-2').hidden = n !== 2;
+    $('#ex-step-3').hidden = n !== 3;
+  }
+
+  function exPickFile(name, size) {
+    state.extract.file = { name: name, size: size };
+    state.extract.projectId = null;
+    $('#ex-name').textContent = name;
+    $('#ex-meta').textContent = size + ' · H.264 1920×1080 · ' + exSpan();
+    exStep(2);
+    $('#ex-after-scan').hidden = true;
+    $('#ex-scan').hidden = false;
+    $('#ex-scan-text').textContent = 'Reading container…';
+    var fill = $('#ex-scanbar');
+    fill.style.width = '0%';
+    var p = 0;
+    var t = setInterval(function () {
+      p += 9 + Math.random() * 14;
+      fill.style.width = Math.min(100, p) + '%';
+      if (p >= 100) {
+        clearInterval(t);
+        $('#ex-scan-text').textContent = 'Found 2 subtitle tracks and 1 audio track.';
+        $('#ex-after-scan').hidden = false;
+        renderExTracks();
+        var first = $('#ex-tracks input');
+        if (first) first.focus();
+      }
+    }, 180);
+  }
+
+  function renderExTracks() {
+    $('#ex-tracks').innerHTML = exTracks().map(function (t) {
+      return '<label class="radio-row">' +
+        '<input type="radio" name="ex-track" value="' + t.k + '"' + (state.extract.track === t.k ? ' checked' : '') + '>' +
+        '<span class="radio-mark"></span>' +
+        '<span class="od-field">' +
+          '<span class="radio-title">' + esc(t.title) + '</span>' +
+          '<span class="track-sub">' + esc(t.sub) + '</span>' +
+        '</span></label>';
+    }).join('');
+  }
+
+  function exRun() {
+    exStep(3);
+    var transcribing = state.extract.track === 'audio';
+    $('#ex-run-note').textContent = transcribing
+      ? 'No usable subtitle track selected, so the audio is transcribed first. This is the slow path.'
+      : 'The embedded track is decoded, re-timed, then translated with your glossary.';
+    var stages = exStages().map(function (s) { return { label: s.label, note: s.note, state: 'wait' }; });
+    if (transcribing) stages[1] = { label: 'Transcribing audio', note: exSpan() + ' of audio', state: 'wait' };
+    state.extract.projectId = null;
+    $('#ex-open').disabled = true;
+    $('#ex-again').hidden = true;
+
+    function paint() {
+      $('#ex-stages').innerHTML = stages.map(function (s) {
+        return '<li class="stage-row" data-s="' + (s.state === 'wait' ? 'wait' : s.state) + '">' +
+          '<span class="stage-mark" data-icon="check"></span>' +
+          '<span>' + esc(s.label) + '</span>' +
+          '<span class="stage-note">' + (s.state === 'wait' ? 'queued' : s.state === 'run' ? 'working…' : esc(s.note)) + '</span>' +
+        '</li>';
+      }).join('');
+      hydrateIcons($('#ex-stages'));
+    }
+    paint();
+
+    var i = 0;
+    function next() {
+      if (i > 0) stages[i - 1].state = 'done';
+      if (i >= stages.length) {
+        paint();
+        var created = exCreateProject();
+        $('#ex-open').disabled = false;
+        $('#ex-again').hidden = false;
+        toast('Created the project “' + created.name + '” from ' + state.extract.file.name + '.', {
+          action: { label: 'Open the project', run: exOpen }
+        });
+        return;
+      }
+      stages[i].state = 'run';
+      paint();
+      i++;
+      setTimeout(next, transcribing && i === 2 ? 2100 : 1050);
+    }
+    next();
+  }
+
+  /* The run ends with a project, not a nameless entry in a list. */
+  function exCreateProject() {
+    var file = state.extract.file;
+    var p = {
+      id: 'p-' + Date.now(), kind: 'video',
+      name: file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '),
+      when: 'Just now', source: file.name, status: 'review',
+      from: state.extract.from, to: state.extract.to,
+      src: state.extract.to.indexOf('zh') === -1 ? 'srt' : 'talk', exports: []
+    };
+    PROJECTS.unshift(p);
+    settleStatus(p);
+    state.extract.projectId = p.id;
+    return p;
+  }
+
+  function exOpen() {
+    if (!state.extract.projectId) { exStep(1); $('#dropzone').focus(); return; }
+    openProject(state.extract.projectId);
+  }
+
+  /* ═══════════════ GLOSSARY ═══════════════ */
+  var RULE_LABEL = { prefer: 'Prefer', keep: 'Keep as-is', forbid: 'Never use' };
+
+  function renderGlossary() {
+    fillScopeSelect($('#gl-scope'), state.gl.scope);
+    state.gl.scope = $('#gl-scope').value;
+    var q = state.gl.q.trim().toLowerCase();
+    var rows = GLOSSARY.filter(function (g) {
+      if (state.gl.scope !== 'all' && g.scope !== state.gl.scope && g.scope !== 'all') return false;
+      if (!q) return true;
+      return (g.term + ' ' + g.target).toLowerCase().indexOf(q) >= 0;
+    });
+    $('#gllist').innerHTML = rows.map(function (g) {
+      return '<li class="gl-row" data-gl="' + g.id + '">' +
+        '<span class="gl-term">' + esc(g.term) + '</span>' +
+        '<span class="gl-target' + (g.target ? '' : ' is-none') + '">' + esc(g.target || 'left untranslated') + '</span>' +
+        '<span><span class="gl-rule" data-r="' + g.rule + '">' + RULE_LABEL[g.rule] + '</span></span>' +
+        '<span class="gl-scope od-truncate">' + esc(scopeLabel(g.scope)) + '</span>' +
+        '<span class="gl-hits gl-hits-cell">×' + g.hits + '</span>' +
+        '<span class="gl-meta-m"><span class="gl-scope od-truncate">' + esc(scopeLabel(g.scope)) + '</span><span class="gl-hits">×' + g.hits + '</span></span>' +
+        '<span class="gl-acts">' +
+          '<button class="btn btn-icon" type="button" data-gl-edit="' + g.id + '" aria-label="Edit ' + esc(g.term) + '"><span data-icon="editor"></span></button>' +
+          '<button class="btn btn-icon btn-danger-ghost" type="button" data-gl-del="' + g.id + '" aria-label="Delete ' + esc(g.term) + '"><span data-icon="trash"></span></button>' +
+        '</span>' +
+      '</li>';
+    }).join('');
+    $('#gl-empty').hidden = rows.length > 0;
+    hydrateIcons($('#gllist'));
+  }
+
+  function openTermDialog(id) {
+    var g = null;
+    for (var i = 0; i < GLOSSARY.length; i++) if (GLOSSARY[i].id === id) g = GLOSSARY[i];
+    state.gl.editing = g ? g.id : null;
+    $('#dlg-term-title').textContent = g ? 'Edit term' : 'Add a term';
+    $('#t-rule').value = g ? g.rule : 'prefer';
+    $('#t-term').value = g ? g.term : '';
+    $('#t-target').value = g ? g.target : '';
+    fillScopeSelect($('#t-scope'), g ? g.scope : state.gl.scope);
+    clearFieldError('#t-term');
+    clearFieldError('#t-target');
+    syncRuleHint();
+    openDlg($('#dlg-term'), '#t-term');
+  }
+
+  function syncRuleHint() {
+    var rule = $('#t-rule').value;
+    $('#t-rule-hint').textContent = rule === 'prefer'
+      ? 'The translator is nudged toward your wording before the decoder commits.'
+      : rule === 'keep'
+        ? 'The term is copied through untouched: product names, people, places.'
+        : 'This translation is rejected; the preferred entry for the same term is used instead.';
+    var needsTarget = rule !== 'keep';
+    $('#t-target-field').hidden = !needsTarget;
+    $('#t-target-req').hidden = !needsTarget;
+    var label = $('#t-target-field .field-label');
+    if (label) label.firstChild.nodeValue = rule === 'forbid' ? 'Never translate as' : 'Becomes';
+    if (!needsTarget) clearFieldError('#t-target');
+  }
+
+  function setFieldError(sel, msg) {
+    var input = $(sel);
+    var err = $(sel + '-err');
+    if (input) input.classList.add('is-bad');
+    if (err) { err.hidden = false; err.textContent = msg; }
+  }
+  function clearFieldError(sel) {
+    var input = $(sel);
+    var err = $(sel + '-err');
+    if (input) input.classList.remove('is-bad');
+    if (err) { err.hidden = true; err.textContent = ''; }
+  }
+
+  function saveTerm() {
+    var rule = $('#t-rule').value;
+    var term = $('#t-term').value.trim();
+    var target = $('#t-target').value.trim();
+    var ok = true;
+    if (!term) { setFieldError('#t-term', 'Enter the word as it appears in the source.'); ok = false; }
+    else clearFieldError('#t-term');
+    if (rule !== 'keep' && !target) {
+      setFieldError('#t-target', rule === 'forbid' ? 'Enter the translation you want blocked.' : 'Enter the translation to use instead.');
+      ok = false;
+    } else clearFieldError('#t-target');
+    if (!ok) { $(!term ? '#t-term' : '#t-target').focus(); return; }
+
+    if (state.gl.editing) {
+      for (var i = 0; i < GLOSSARY.length; i++) {
+        if (GLOSSARY[i].id === state.gl.editing) {
+          GLOSSARY[i].term = term;
+          GLOSSARY[i].target = rule === 'keep' ? '' : target;
+          GLOSSARY[i].rule = rule;
+          GLOSSARY[i].scope = $('#t-scope').value;
+        }
+      }
+      toast('Updated “' + term + '”.');
+    } else {
+      GLOSSARY.push({ id: 'g' + (GLOSSARY.length + 1) + '-' + Date.now(), term: term,
+        target: rule === 'keep' ? '' : target, rule: rule, scope: $('#t-scope').value, hits: 0 });
+      toast('Added “' + term + '” to the glossary.');
+    }
+    $('#dlg-term').close();
+    renderGlossary();
+    if (state.view === 'editor') renderEditor();
+  }
+
+  function deleteTerm(id) {
+    var g = null;
+    for (var i = 0; i < GLOSSARY.length; i++) if (GLOSSARY[i].id === id) g = GLOSSARY[i];
+    if (!g) return;
+    askConfirm({
+      title: 'Delete this term?',
+      text: '“' + g.term + '” will stop being enforced. Segments already translated keep their current wording.',
+      okLabel: 'Delete term',
+      run: function () {
+        GLOSSARY.splice(GLOSSARY.indexOf(g), 1);
+        renderGlossary();
+        var next = $('#gllist .btn-icon');
+        if (next) next.focus(); else { var p = $('#gl-add'); if (p) p.focus(); }
+        toast('Deleted “' + g.term + '”.');
+      }
+    });
+  }
+
+  /* ═══════════════ EXPORT ═══════════════ */
+  /* The wrap width owns line breaks on export, so the cue's authored breaks
+     are reflowed rather than left inside a line. */
+  function wrapLine(text, max) {
+    var t = String(text).replace(/\s*\n\s*/g, ' ').trim();
+    if (!t) return [];
+    if (t.length <= max) return [t];
+    var hasSpaces = t.indexOf(' ') >= 0;
+    if (!hasSpaces) {
+      var lines = [];
+      for (var i = 0; i < t.length; i += max) lines.push(t.slice(i, i + max));
+      return lines;
+    }
+    var words = t.split(' ');
+    var out = [];
+    var cur = '';
+    words.forEach(function (w) {
+      if (!cur) { cur = w; return; }
+      if ((cur + ' ' + w).length <= max) cur += ' ' + w;
+      else { out.push(cur); cur = w; }
+    });
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  function exportCues() {
+    var p = currentProject();
+    if (!p) return { project: null, cues: [] };
+    var segs = segsFor(p);
+    var cues = [];
+    segs.forEach(function (s, i) {
+      var flags = flagsFor(segs, i, p.id);
+      if (state.exp.skipFlagged && isFlagged(flags)) return;
+      var last = cues[cues.length - 1];
+      if (state.exp.merge && last && s.in - last.out < 120) {
+        last.out = s.out;
+        last.trans = (last.trans + ' ' + s.trans).trim();
+        last.orig = (last.orig + ' ' + s.orig).trim();
+        return;
+      }
+      cues.push({ in: s.in, out: s.out, orig: s.orig, trans: s.trans });
+    });
+    return { project: p, cues: cues };
+  }
+
+  function cueLines(c) {
+    var w = state.exp.wrap;
+    var a = wrapLine(c.trans, w);
+    var b = wrapLine(c.orig, w);
+    if (state.exp.layout === 'trans') return [{ r: 'a', l: a }];
+    if (state.exp.layout === 'orig') return [{ r: 'a', l: b }];
+    if (state.exp.layout === 'orig-first') return [{ r: 'a', l: b }, { r: 'b', l: a }];
+    return [{ r: 'a', l: a }, { r: 'b', l: b }];
+  }
+
+  function buildExport() {
+    var data = exportCues();
+    var f = state.exp.format;
+    var rows = [];
+    if (f === 'vtt') rows.push({ r: 'idx', t: 'WEBVTT' }, { r: 'raw', t: '' });
+    if (f === 'ass') {
+      rows.push({ r: 'idx', t: '[Script Info]' },
+        { r: 'raw', t: 'ScriptType: v4.00+' },
+        { r: 'raw', t: 'PlayResX: 1920' },
+        { r: 'raw', t: 'PlayResY: 1080' },
+        { r: 'raw', t: '' },
+        { r: 'idx', t: '[Events]' },
+        { r: 'raw', t: 'Format: Layer, Start, End, Style, Text' });
+    }
+    data.cues.forEach(function (c, i) {
+      var groups = cueLines(c);
+      if (f === 'txt') {
+        rows.push({ r: 'tc', t: '[' + mmss(c.in) + ']' });
+        groups.forEach(function (g) { g.l.forEach(function (l) { rows.push({ r: g.r, t: l }); }); });
+        rows.push({ r: 'raw', t: '' });
+        return;
+      }
+      if (f === 'ass') {
+        var text = groups.map(function (g) { return g.l.join('\\N'); }).filter(Boolean).join('\\N');
+        rows.push({ r: 'tc', t: 'Dialogue: 0,' + assTime(c.in) + ',' + assTime(c.out) + ',Default,', cont: { r: 'a', t: text } });
+        return;
+      }
+      if (f === 'srt') rows.push({ r: 'idx', t: String(i + 1) });
+      rows.push({ r: 'tc', t: (f === 'vtt' ? vttTime(c.in) + ' --> ' + vttTime(c.out) : srtTime(c.in) + ' --> ' + srtTime(c.out)) });
+      groups.forEach(function (g) { g.l.forEach(function (l) { rows.push({ r: g.r, t: l }); }); });
+      rows.push({ r: 'raw', t: '' });
+    });
+
+    var text = rows.map(function (r) { return r.cont ? r.t + r.cont.t : r.t; }).join('\n');
+    var html = rows.map(function (r) {
+      var span = function (role, t) { return role === 'raw' ? esc(t) : '<span class="pv-' + role + '">' + esc(t) + '</span>'; };
+      return r.cont ? span(r.r, r.t) + span(r.cont.r, r.cont.t) : span(r.r, r.t);
+    }).join('\n');
+    if (state.exp.bom && f !== 'txt') text = '\uFEFF' + text;
+
+    var stem = data.project ? fileStem(data.project) + '.' + data.project.to : 'subtitles';
+    return { text: text, html: html, count: data.cues.length, project: data.project, filename: stem + '.' + f };
+  }
+
+  var LAYOUT_LABEL = {
+    stacked: 'Stacked bilingual', 'orig-first': 'Original on top',
+    trans: 'Translation only', orig: 'Original only'
+  };
+
+  function renderExportHistory() {
+    var p = currentProject();
+    var rows = (p && p.exports) || [];
+    $('#exp-hist').innerHTML = rows.map(function (e) {
+      return '<li class="exp-hist-row">' +
+        '<span class="exp-hist-fmt">.' + esc(e.format) + '</span>' +
+        '<span class="exp-hist-note">' + esc(e.layout) + ', ' + e.cues + ' cues' +
+          (e.how === 'clipboard' ? ', copied' : '') + '</span>' +
+        '<span class="exp-hist-when">' + esc(e.when) + '</span>' +
+      '</li>';
+    }).join('');
+    $('#exp-hist-empty').hidden = rows.length > 0;
+  }
+
+  function recordExport(built, how) {
+    if (!built.project) return;
+    built.project.exports = built.project.exports || [];
+    built.project.exports.unshift({
+      when: 'Just now', format: state.exp.format, layout: LAYOUT_LABEL[state.exp.layout],
+      cues: built.count, how: how
+    });
+    renderExportHistory();
+  }
+
+  function renderExport() {
+    renderProjectBar('exp');
+    var built = buildExport();
+    $('#exp-preview').innerHTML = built.html ||
+      '<span class="pv-idx">Nothing to export from this project with these options.</span>';
+    $('#exp-meta').textContent = built.project
+      ? built.count + ' cues · ' + built.filename
+      : 'No project open';
+    $('#exp-wrap-val').textContent = state.exp.wrap + ' characters';
+    $('#exp-copy').disabled = !built.project || built.count === 0;
+    $('#exp-save').disabled = !built.project || built.count === 0;
+    renderExportHistory();
+  }
+
+  function copyExport() {
+    var built = buildExport();
+    var done = function () {
+      recordExport(built, 'clipboard');
+      toast('Copied ' + built.count + ' cues as ' + built.filename + '.');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(built.text).then(done, fallbackCopy);
+    } else fallbackCopy();
+
+    function fallbackCopy() {
+      var ta = document.createElement('textarea');
+      ta.value = built.text;
+      ta.setAttribute('readonly', '');
+      ta.className = 'sr-only';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) done();
+      else toast('This preview blocks clipboard access. Select the preview text and copy it manually.', { type: 'warn' });
+    }
+  }
+
+  function saveExport() {
+    var built = buildExport();
+    try {
+      var blob = new Blob([built.text], { type: 'text/plain;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = built.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      recordExport(built, 'file');
+      toast('Writing ' + built.filename + ' · ' + built.count + ' cues.');
+    } catch (e) {
+      toast('This preview blocks file writes. Use “Copy subtitle text” instead.', { type: 'warn' });
+    }
+  }
+
+  /* ═══════════════ WIRING ═══════════════ */
+  function init() {
+    hydrateIcons();
+    buildVu();
+
+    fillLangs($('#live-from'), state.live.from);
+    fillLangs($('#live-to'), state.live.to);
+    fillLangs($('#ex-from'), state.extract.from);
+    fillLangs($('#ex-to'), state.extract.to);
+    refreshSourceUi();
+    setLiveStatus('idle');
+    renderProjects();
+    renderGlossary();
+    buildWave(-1);
+
+    /* nav + cross-view jumps */
+    document.addEventListener('click', function (e) {
+      var nav = e.target.closest('[data-nav]');
+      if (nav) { showView(nav.getAttribute('data-nav')); return; }
+      var go = e.target.closest('[data-go]');
+      if (go) { showView(go.getAttribute('data-go')); return; }
+      var act = e.target.closest('[data-act="start-live"]');
+      if (act) { startLive(); return; }
+      var close = e.target.closest('[data-close-dlg]');
+      if (close) { var d = close.closest('dialog'); if (d) d.close(); return; }
+    });
+
+    /* live controls */
+    $('#live-start').addEventListener('click', startLive);
+    $('#live-pause').addEventListener('click', pauseLive);
+    $('#live-stop').addEventListener('click', stopLive);
+    $('#live-discard').addEventListener('click', discardCapture);
+    $('#lv-rename').addEventListener('click', function () { openRenameDialog(); });
+    $('#lv-open').addEventListener('click', function () {
+      var p = liveProject();
+      if (p) openProject(p.id);
+    });
+    $('#live-swap').addEventListener('click', function () {
+      var f = state.live.from;
+      state.live.from = state.live.to;
+      state.live.to = f;
+      $('#live-from').value = state.live.from;
+      $('#live-to').value = state.live.to;
+      refreshSourceUi();
+      currentLine = scriptLine(state.live.line);
+    });
+    $('#live-from').addEventListener('change', function () { state.live.from = this.value; refreshSourceUi(); currentLine = scriptLine(state.live.line); });
+    $('#live-to').addEventListener('change', function () { state.live.to = this.value; refreshSourceUi(); currentLine = scriptLine(state.live.line); });
+    $('#source-detail').addEventListener('change', function () { state.live.detail = this.value; refreshSourceUi(); });
+    $$('#view-live .seg').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        $$('#view-live .seg').forEach(function (b) { b.setAttribute('aria-pressed', String(b === btn)); });
+        state.live.source = btn.getAttribute('data-source');
+        state.live.detail = SOURCES[state.live.source].items[0];
+        refreshSourceUi();
+      });
+    });
+    $('#opt-provisional').addEventListener('change', function () { state.live.provisional = this.checked; });
+    $('#opt-terms').addEventListener('change', function () {
+      state.live.terms = this.checked;
+      $('#transcript').classList.toggle('no-terms', !this.checked);
+      $('#overlay-preview').classList.toggle('no-terms', !this.checked);
+    });
+
+    /* projects */
+    $('#pj-search').addEventListener('input', function () { state.pj.q = this.value; renderProjects(); });
+    $('#pj-clear').addEventListener('click', function () {
+      state.pj.q = ''; state.pj.filter = 'all';
+      $('#pj-search').value = '';
+      renderProjects();
+      $('#pj-search').focus();
+    });
+    $('#pj-filters').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-pj-filter]');
+      if (!b) return;
+      state.pj.filter = b.getAttribute('data-pj-filter');
+      renderProjects();
+      var again = $('#pj-filters [data-pj-filter="' + state.pj.filter + '"]');
+      if (again) again.focus();
+    });
+    $('#projlist').addEventListener('click', function (e) {
+      var open = e.target.closest('[data-open]');
+      if (open) { openProject(open.getAttribute('data-open')); return; }
+      var exp = e.target.closest('[data-exp]');
+      if (exp) { state.projectId = exp.getAttribute('data-exp'); showView('export'); return; }
+      var del = e.target.closest('[data-del]');
+      if (del) { deleteProject(del.getAttribute('data-del')); }
+    });
+
+    /* project switchers on the two project-scoped screens */
+    $('#ed-project').addEventListener('change', function () {
+      state.projectId = this.value;
+      resetEditorView();
+      renderEditor();
+    });
+    $('#exp-project').addEventListener('change', function () {
+      state.projectId = this.value;
+      renderExport();
+    });
+
+    /* editor */
+    $('#ed-filters').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-ed-filter]');
+      if (!b) return;
+      state.editor.filter = b.getAttribute('data-ed-filter');
+      renderEditor();
+      var again = $('#ed-filters [data-ed-filter="' + state.editor.filter + '"]');
+      if (again) again.focus();
+    });
+    $('#ed-show-all').addEventListener('click', function () {
+      state.editor.filter = 'all';
+      renderEditor();
+      var first = $('#seglist .seg-tr');
+      if (first) first.focus();
+    });
+    $('#seglist').addEventListener('input', function (e) {
+      var box = e.target.closest('[data-tr]');
+      if (!box) return;
+      var i = Number(box.getAttribute('data-tr'));
+      var segs = currentSegs();
+      segs[i].trans = box.value;
+      autosize(box);
+      var p = currentProject();
+      var row = box.closest('.seg-row');
+      var flags = flagsFor(segs, i, p ? p.id : null);
+      var cell = $('.seg-flags', row);
+      if (cell) cell.innerHTML = flagsHtml(flags);
+      row.classList.toggle('is-flagged', isFlagged(flags));
+      if (state.editor.active === i) renderInspector();
+      renderEdFilters();
+      refreshProjectProgress();
+    });
+    $('#seglist').addEventListener('change', function (e) {
+      var pick = e.target.closest('[data-pick]');
+      if (!pick) return;
+      state.editor.picked[Number(pick.getAttribute('data-pick'))] = pick.checked;
+      updateSelectionUi();
+    });
+    $('#seglist').addEventListener('focusin', function (e) {
+      var row = e.target.closest('.seg-row');
+      if (!row) return;
+      var i = Number(row.getAttribute('data-row'));
+      if (state.editor.active === i) return;
+      state.editor.active = i;
+      $$('#seglist .seg-row').forEach(function (r) { r.classList.toggle('is-active', r === row); });
+      renderInspector();
+    });
+    $('#seglist').addEventListener('click', function (e) {
+      var row = e.target.closest('.seg-row');
+      if (!row) return;
+      var i = Number(row.getAttribute('data-row'));
+      state.editor.active = i;
+      $$('#seglist .seg-row').forEach(function (r) { r.classList.toggle('is-active', r === row); });
+      renderInspector();
+      var focusBtn = e.target.closest('[data-row-focus]');
+      if (focusBtn) {
+        var box = $('#seglist [data-tr="' + i + '"]');
+        if (box) box.focus();
+      }
+    });
+    $('#ed-retranslate').addEventListener('click', function () {
+      var idx = Object.keys(state.editor.picked)
+        .filter(function (k) { return state.editor.picked[k]; })
+        .map(Number);
+      if (idx.length) retranslate(idx);
+    });
+    $('#ed-clear-sel').addEventListener('click', function () {
+      state.editor.picked = {};
+      renderEditor();
+      $('#ed-retranslate').focus();
+    });
+    $('#insp-retranslate').addEventListener('click', function () {
+      if (state.editor.active >= 0) retranslate([state.editor.active]);
+    });
+    $('#ed-save').addEventListener('click', function () {
+      var p = currentProject();
+      if (!p) return;
+      var open = reviewProgress(p).open;
+      settleStatus(p);
+      toast(open
+        ? 'Saved to “' + p.name + '”. ' + open + (open === 1 ? ' segment still needs' : ' segments still need') + ' review.'
+        : 'Saved to “' + p.name + '”. Every segment is translated and within the reading limits.',
+        { type: open ? 'warn' : 'ok' });
+      renderEditor();
+      renderProjects();
+    });
+    $('#ed-export').addEventListener('click', function () { showView('export'); });
+
+    /* extract */
+    $('#dropzone').addEventListener('click', function () { $('#ex-file').click(); });
+    $('#dropzone').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#ex-file').click(); }
+    });
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      $('#dropzone').addEventListener(ev, function (e) { e.preventDefault(); this.classList.add('is-over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      $('#dropzone').addEventListener(ev, function (e) { e.preventDefault(); this.classList.remove('is-over'); });
+    });
+    $('#dropzone').addEventListener('drop', function (e) {
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) exPickFile(f.name, (f.size / 1048576).toFixed(0) + ' MB');
+      else toast('That drop had no file in it.', { type: 'warn' });
+    });
+    $('#ex-file').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      if (f) exPickFile(f.name, (f.size / 1048576).toFixed(0) + ' MB');
+      this.value = '';
+    });
+    $('#ex-sample').addEventListener('click', function () { exPickFile('quarterly-product-demo.mp4', '412 MB'); });
+    $('#ex-change').addEventListener('click', function () { exStep(1); $('#dropzone').focus(); });
+    $('#ex-reset').addEventListener('click', function () { exStep(1); $('#dropzone').focus(); });
+    $('#ex-tracks').addEventListener('change', function (e) {
+      if (e.target.name === 'ex-track') state.extract.track = e.target.value;
+    });
+    $('#ex-from').addEventListener('change', function () { state.extract.from = this.value; });
+    $('#ex-to').addEventListener('change', function () { state.extract.to = this.value; });
+    $('#ex-run').addEventListener('click', exRun);
+    $('#ex-open').addEventListener('click', exOpen);
+    $('#ex-again').addEventListener('click', function () { exStep(1); $('#dropzone').focus(); });
+
+    /* glossary */
+    $('#gl-search').addEventListener('input', function () { state.gl.q = this.value; renderGlossary(); });
+    $('#gl-scope').addEventListener('change', function () { state.gl.scope = this.value; renderGlossary(); });
+    $('#gl-add').addEventListener('click', function () { openTermDialog(null); });
+    $('#gl-empty-add').addEventListener('click', function () { openTermDialog(null); });
+    $('#gllist').addEventListener('click', function (e) {
+      var ed = e.target.closest('[data-gl-edit]');
+      if (ed) { openTermDialog(ed.getAttribute('data-gl-edit')); return; }
+      var del = e.target.closest('[data-gl-del]');
+      if (del) deleteTerm(del.getAttribute('data-gl-del'));
+    });
+    $('#t-rule').addEventListener('change', syncRuleHint);
+    $('#t-term').addEventListener('blur', function () {
+      if (!this.value.trim()) setFieldError('#t-term', 'Enter the word as it appears in the source.');
+      else clearFieldError('#t-term');
+    });
+    $('#t-target').addEventListener('blur', function () {
+      if ($('#t-rule').value !== 'keep' && !this.value.trim()) {
+        setFieldError('#t-target', $('#t-rule').value === 'forbid' ? 'Enter the translation you want blocked.' : 'Enter the translation to use instead.');
+      } else clearFieldError('#t-target');
+    });
+    $('#dlg-term-ok').addEventListener('click', saveTerm);
+    $$('#dlg-term .input').forEach(function (el) {
+      el.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); saveTerm(); } });
+    });
+
+    /* rename dialog */
+    $('#dlg-rename-ok').addEventListener('click', renameProject);
+    $('#s-name').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); renameProject(); } });
+    $('#s-name').addEventListener('blur', function () {
+      if (!this.value.trim()) setFieldError('#s-name', 'Name the project so you can find this track again.');
+      else clearFieldError('#s-name');
+    });
+
+    /* confirm dialog */
+    $('#dlg-confirm-ok').addEventListener('click', function () {
+      var run = confirmRun;
+      confirmRun = null;
+      $('#dlg-confirm').close();
+      if (run) run();
+    });
+    $$('dialog').forEach(function (d) { d.addEventListener('close', restoreFocus); });
+
+    /* export */
+    $$('input[name="exp-format"]').forEach(function (r) {
+      r.addEventListener('change', function () { state.exp.format = this.value; renderExport(); });
+    });
+    $$('input[name="exp-layout"]').forEach(function (r) {
+      r.addEventListener('change', function () { state.exp.layout = this.value; renderExport(); });
+    });
+    $('#exp-wrap').addEventListener('input', function () { state.exp.wrap = Number(this.value); renderExport(); });
+    $('#exp-merge').addEventListener('change', function () { state.exp.merge = this.checked; renderExport(); });
+    $('#exp-flagged').addEventListener('change', function () { state.exp.skipFlagged = this.checked; renderExport(); });
+    $('#exp-bom').addEventListener('change', function () { state.exp.bom = this.checked; renderExport(); });
+    $('#exp-copy').addEventListener('click', copyExport);
+    $('#exp-save').addEventListener('click', saveExport);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+</script>
+</body>
+</html>
