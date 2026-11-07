@@ -62,7 +62,7 @@ open target/release/bundle/osx/Taurus.app
 
 This also writes a disk image, `target/release/bundle/dmg/Taurus.dmg`.
 
-On GitHub, every push and pull request is built and tested (`.github/workflows/ci.yml`). Pushing a tag such as `v0.2.0` publishes the app as a `.dmg` and a `.zip` on the Releases page (`.github/workflows/release.yml`). The app is signed ad hoc but not notarised, so on first launch, right-click it and choose **Open**.
+On GitHub, every push and pull request is built and tested (`.github/workflows/ci.yml`). Releases are versioned by tag (`.github/workflows/release.yml`). Push a tag such as `v0.2.0` (`git tag v0.2.0 && git push origin v0.2.0`), or run **Release** from the Actions tab and type `0.2.0`. Either way, the app is built as version 0.2.0 and published on the Releases page as a `.dmg`, a `.zip` and their SHA-256 checksums. Tags with a suffix, like `v0.2.0-beta.1`, are marked as pre-releases. The app is signed ad hoc but not notarised, so on first launch, right-click it and choose **Open**.
 
 The first live caption asks for **Screen & System Audio Recording** permission, which is needed to hear the Mac's sound, or **Microphone** permission. You can manage both in System Settings, under Privacy & Security.
 
