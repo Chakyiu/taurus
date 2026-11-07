@@ -17,9 +17,17 @@ env:
 jobs:
   macos:
     name: Bundle Taurus.app
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+
+      # screencapturekit's Metal bridge uses APIs from the macOS 26 SDK.
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
+        run: xcodebuild -version && xcrun --show-sdk-version
 
       - uses: dtolnay/rust-toolchain@stable
 
