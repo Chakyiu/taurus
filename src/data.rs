@@ -53,7 +53,9 @@ impl Source {
     }
 
     pub fn from_key(key: &str) -> Option<Source> {
-        [Source::Both, Source::System, Source::Mic].into_iter().find(|s| s.key() == key)
+        [Source::Both, Source::System, Source::Mic]
+            .into_iter()
+            .find(|s| s.key() == key)
     }
 }
 
@@ -163,6 +165,10 @@ pub struct Segment {
     /// Index into the project's speakers, once voices have been identified.
     #[serde(default)]
     pub speaker: Option<u8>,
+    /// A correction of `orig` suggested by the language model, waiting to be
+    /// accepted or turned down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 impl Segment {
@@ -174,6 +180,7 @@ impl Segment {
             trans: trans.into(),
             base: trans.into(),
             speaker: None,
+            fix: None,
         }
     }
 }
@@ -321,7 +328,6 @@ impl Kind {
             Kind::Subtitle => "Imported subtitles",
         }
     }
-
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -352,7 +358,6 @@ impl Format {
             Format::Txt => "txt",
         }
     }
-
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -431,6 +436,9 @@ pub struct Project {
     /// The summary was asked for as a fuller account.
     #[serde(default)]
     pub summary_long: bool,
+    /// What the recording is about, in the user's words, for correcting it.
+    #[serde(default)]
+    pub about: String,
 }
 
 fn yes() -> bool {
@@ -484,7 +492,11 @@ pub fn title_from_file(file_name: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if name.is_empty() { file_name.to_string() } else { name }
+    if name.is_empty() {
+        file_name.to_string()
+    } else {
+        name
+    }
 }
 
 impl Project {
@@ -525,6 +537,7 @@ impl Project {
             summary_lang: String::new(),
             summary_model: String::new(),
             summary_long: false,
+            about: String::new(),
         }
     }
 
@@ -567,7 +580,11 @@ impl Project {
         if self.segs.is_empty() {
             return 0;
         }
-        let done = self.segs.iter().filter(|s| !s.trans.trim().is_empty()).count();
+        let done = self
+            .segs
+            .iter()
+            .filter(|s| !s.trans.trim().is_empty())
+            .count();
         (done as f64 / self.segs.len() as f64 * 100.0).round() as u32
     }
 
@@ -899,6 +916,8 @@ pub enum FlagKind {
     Gap,
     Empty,
     Term,
+    /// A suggested correction waits for a decision.
+    Fix,
 }
 
 #[derive(Clone, Debug)]
@@ -920,7 +939,11 @@ pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
     let project_id = Some(p.id.as_str());
     let s = &segs[i];
     let dur = ((s.out_ms - s.in_ms) as f64 / 1000.0).max(0.1);
-    let text = if p.translate { s.trans.trim() } else { s.orig.trim() };
+    let text = if p.translate {
+        s.trans.trim()
+    } else {
+        s.orig.trim()
+    };
     let mut out = Vec::new();
     let flag = |kind, label: String| Flag { kind, label };
     if text.is_empty() {
@@ -941,7 +964,11 @@ pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
             out.push(flag(FlagKind::Gap, format!("{gap} ms gap")));
         }
     }
-    let t = if p.translate { terms_in(glossary, &s.orig, project_id) } else { Vec::new() };
+    let t = if p.translate {
+        terms_in(glossary, &s.orig, project_id)
+    } else {
+        Vec::new()
+    };
     if !t.is_empty() {
         let label = if t.len() == 1 {
             "1 term".to_string()
@@ -950,12 +977,16 @@ pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
         };
         out.push(flag(FlagKind::Term, label));
     }
+    if s.fix.is_some() {
+        out.push(flag(FlagKind::Fix, "suggested fix".into()));
+    }
     if out.is_empty() {
         out.push(flag(FlagKind::Ok, "clean".into()));
     }
     out
 }
 
+/// A line that would read badly on screen.
 pub fn is_flagged(flags: &[Flag]) -> bool {
     flags.iter().any(|f| {
         matches!(
@@ -965,6 +996,11 @@ pub fn is_flagged(flags: &[Flag]) -> bool {
     })
 }
 
+/// A line to look at: one that reads badly, or one with a fix to decide on.
+pub fn to_check(flags: &[Flag]) -> bool {
+    is_flagged(flags) || flags.iter().any(|f| f.kind == FlagKind::Fix)
+}
+
 pub struct Stats {
     pub count: usize,
     pub flagged: usize,
@@ -972,7 +1008,7 @@ pub struct Stats {
 
 pub fn project_stats(glossary: &[Term], p: &Project) -> Stats {
     let flagged = (0..p.segs.len())
-        .filter(|&i| is_flagged(&flags_for(glossary, p, i)))
+        .filter(|&i| to_check(&flags_for(glossary, p, i)))
         .count();
     Stats {
         count: p.segs.len(),
@@ -999,6 +1035,96 @@ pub fn settle_status(glossary: &[Term], p: &mut Project) {
     } else {
         Status::Done
     };
+}
+
+// ─── corrections ───────────────────────────────────────────
+
+/// Whether a suggested correction changes more than the spacing of a line.
+pub fn is_real_fix(orig: &str, fixed: &str) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    !fixed.trim().is_empty() && squash(orig) != squash(fixed)
+}
+
+/// What became of a piece of a line when it was corrected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change {
+    Same,
+    Gone,
+    Added,
+}
+
+/// `old` and `new` compared word by word, or character by character in
+/// Chinese, Japanese and Korean, as runs of text. Where a word was replaced,
+/// the old one comes first.
+pub fn word_diff(old: &str, new: &str) -> Vec<(Change, String)> {
+    let (a, b) = (diff_tokens(old), diff_tokens(new));
+    let (n, m) = (a.len(), b.len());
+    if n * m > 250_000 {
+        return vec![
+            (Change::Gone, old.to_string()),
+            (Change::Added, new.to_string()),
+        ];
+    }
+    // lcs[i][j]: the longest common run of tokens in a[i..] and b[j..].
+    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut out: Vec<(Change, String)> = Vec::new();
+    let mut push = |kind: Change, text: &str| match out.last_mut() {
+        Some((k, run)) if *k == kind => run.push_str(text),
+        _ => out.push((kind, text.to_string())),
+    };
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            push(Change::Same, a[i]);
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
+            push(Change::Gone, a[i]);
+            i += 1;
+        } else {
+            push(Change::Added, b[j]);
+            j += 1;
+        }
+    }
+    out
+}
+
+/// Runs of letters and digits, and every other character on its own,
+/// including each Chinese, Japanese or Korean character.
+fn diff_tokens(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut word: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        let in_word = c.is_alphanumeric() && !is_cjk_char(c);
+        if in_word {
+            word.get_or_insert(i);
+            continue;
+        }
+        if let Some(start) = word.take() {
+            out.push(&s[start..i]);
+        }
+        out.push(&s[i..i + c.len_utf8()]);
+    }
+    if let Some(start) = word {
+        out.push(&s[start..]);
+    }
+    out
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xAC00..=0xD7AF | 0x20000..=0x2FA1F
+    )
 }
 
 pub fn file_stem(name: &str) -> String {
@@ -1342,6 +1468,60 @@ mod tests {
     }
 
     #[test]
+    fn corrections_show_what_changed() {
+        use Change::*;
+        let runs = |old: &str, new: &str| -> Vec<(Change, String)> { word_diff(old, new) };
+        assert_eq!(
+            runs(
+                "We spent less on service, which helps.",
+                "We spent less on servers, which helps."
+            ),
+            vec![
+                (Same, "We spent less on ".into()),
+                (Gone, "service".into()),
+                (Added, "servers".into()),
+                (Same, ", which helps.".into()),
+            ]
+        );
+        assert_eq!(
+            runs("今天天汽很好", "今天天气很好"),
+            vec![
+                (Same, "今天天".into()),
+                (Gone, "汽".into()),
+                (Added, "气".into()),
+                (Same, "很好".into())
+            ]
+        );
+        assert_eq!(
+            runs("same words", "same words"),
+            vec![(Same, "same words".into())]
+        );
+        assert_eq!(runs("", "new"), vec![(Added, "new".into())]);
+
+        assert!(is_real_fix("Java Script", "JavaScript"));
+        assert!(!is_real_fix("a  b ", "a b"));
+        assert!(!is_real_fix("words", "  "));
+
+        let mut p = Project::new(
+            "t".into(),
+            Kind::Subtitle,
+            "talk".into(),
+            "talk.srt".into(),
+            None,
+            Status::Done,
+            "en",
+            "zh",
+            vec![Segment::new(0, 3000, "Fine.", "")],
+        );
+        p.translate = false;
+        assert!(!to_check(&flags_for(&[], &p, 0)));
+        p.segs[0].fix = Some("Fine!".into());
+        let flags = flags_for(&[], &p, 0);
+        assert!(to_check(&flags) && !is_flagged(&flags));
+        assert_eq!(project_stats(&[], &p).flagged, 1);
+    }
+
+    #[test]
     fn night_market_has_five_open_cues() {
         let g = fixture_glossary();
         let p = fixture_projects()
@@ -1408,14 +1588,21 @@ mod tests {
     #[test]
     fn untranslated_lines_are_checked_and_exported_as_spoken() {
         let g = fixture_glossary();
-        let mut p = fixture_projects().into_iter().find(|p| p.id == "p1").unwrap();
+        let mut p = fixture_projects()
+            .into_iter()
+            .find(|p| p.id == "p1")
+            .unwrap();
         p.translate = false;
         for s in &mut p.segs {
             s.trans.clear();
         }
         p.segs[0].speaker = Some(0);
         p.speakers = vec!["Ana".into()];
-        assert!(flags_for(&g, &p, 0).iter().all(|f| f.kind != FlagKind::Empty));
+        assert!(
+            flags_for(&g, &p, 0)
+                .iter()
+                .all(|f| f.kind != FlagKind::Empty)
+        );
         let b = build_export(
             &g,
             &p,
@@ -1429,7 +1616,11 @@ mod tests {
                 speakers: true,
             },
         );
-        assert!(b.text.lines().nth(2).unwrap().starts_with("Ana: "), "{}", b.text);
+        assert!(
+            b.text.lines().nth(2).unwrap().starts_with("Ana: "),
+            "{}",
+            b.text
+        );
         assert!(b.filename.ends_with(".en.srt"), "{}", b.filename);
     }
 

@@ -26,7 +26,11 @@ pub type Progress = Arc<dyn Fn(f32) + Send + Sync>;
 pub enum Engine {
     Whisper(Arc<WhisperContext>),
     Qwen(Arc<Qwen>),
-    Remote { url: String, model: String, key: String },
+    Remote {
+        url: String,
+        model: String,
+        key: String,
+    },
 }
 
 static WHISPER: Mutex<Option<(String, Arc<WhisperContext>)>> = Mutex::new(None);
@@ -60,11 +64,9 @@ impl Engine {
                     return Ok(Engine::Whisper(ctx.clone()));
                 }
                 let path = m.path();
-                let ctx = WhisperContext::new_with_params(
-                    &path,
-                    WhisperContextParameters::default(),
-                )
-                .map_err(|e| anyhow!("could not load {}: {e}", path.display()))?;
+                let ctx =
+                    WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+                        .map_err(|e| anyhow!("could not load {}: {e}", path.display()))?;
                 let ctx = Arc::new(ctx);
                 *cache = Some((m.id.to_string(), ctx.clone()));
                 Ok(Engine::Whisper(ctx))
@@ -111,12 +113,19 @@ impl Engine {
         match &engine {
             Engine::Whisper(_) => {
                 engine.transcribe(&silence, "en", true, None)?;
-                Ok(format!("Whisper {} is loaded and listening.", s.whisper_model))
+                Ok(format!(
+                    "Whisper {} is loaded and listening.",
+                    s.whisper_model
+                ))
             }
             Engine::Qwen(_) => {
                 let t = std::time::Instant::now();
                 engine.transcribe(&silence, "en", true, None)?;
-                Ok(format!("Qwen3-ASR {} is loaded; a second of audio took {} ms.", s.qwen_local_model.to_uppercase(), t.elapsed().as_millis()))
+                Ok(format!(
+                    "Qwen3-ASR {} is loaded; a second of audio took {} ms.",
+                    s.qwen_local_model.to_uppercase(),
+                    t.elapsed().as_millis()
+                ))
             }
             Engine::Remote { url, model, .. } => {
                 engine.transcribe(&silence, "en", true, None)?;
@@ -144,7 +153,11 @@ impl Engine {
                 Ok(if text.is_empty() || is_noise_caption(&text) {
                     vec![]
                 } else {
-                    vec![AsrSeg { start_ms: 0, end_ms: dur, text }]
+                    vec![AsrSeg {
+                        start_ms: 0,
+                        end_ms: dur,
+                        text,
+                    }]
                 })
             }
             Engine::Remote { url, model, key } => remote(url, model, key, pcm, lang),
@@ -175,7 +188,9 @@ impl Engine {
                     for mut s in self.transcribe(&pcm[*a..*b], lang, false, None)? {
                         s.start_ms += offset;
                         s.end_ms += offset;
-                        s.end_ms = s.end_ms.min(offset + ((b - a) / (SAMPLE_RATE / 1000)) as i64);
+                        s.end_ms = s
+                            .end_ms
+                            .min(offset + ((b - a) / (SAMPLE_RATE / 1000)) as i64);
                         out.push(s);
                     }
                     done += b - a;
@@ -210,7 +225,10 @@ fn whisper(
 ) -> Result<Vec<AsrSeg>> {
     let mut state = ctx.create_state().map_err(|e| anyhow!("whisper: {e}"))?;
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
     params.set_n_threads(threads as i32);
     params.set_language(whisper_lang(lang));
     params.set_translate(false);
@@ -232,10 +250,15 @@ fn whisper(
     if let Some(p) = progress {
         params.set_progress_callback_safe(move |pct: i32| p(pct as f32 / 100.0));
     }
-    state.full(params, pcm).map_err(|e| anyhow!("whisper: {e}"))?;
+    state
+        .full(params, pcm)
+        .map_err(|e| anyhow!("whisper: {e}"))?;
     let mut out = Vec::new();
     for seg in state.as_iter() {
-        let text = seg.to_str_lossy().map(|t| t.trim().to_string()).unwrap_or_default();
+        let text = seg
+            .to_str_lossy()
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         if text.is_empty() || seg.no_speech_probability() > 0.6 || is_noise_caption(&text) {
             continue;
         }
@@ -253,7 +276,10 @@ fn is_noise_caption(t: &str) -> bool {
     let t = t.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
     let l = t.to_lowercase();
     (t.starts_with('[') || t.starts_with('(') || t.starts_with('♪'))
-        || matches!(l.as_str(), "" | "music" | "applause" | "silence" | "blank_audio")
+        || matches!(
+            l.as_str(),
+            "" | "music" | "applause" | "silence" | "blank_audio"
+        )
 }
 
 fn remote(url: &str, model: &str, key: &str, pcm: &[f32], lang: &str) -> Result<Vec<AsrSeg>> {
@@ -261,8 +287,10 @@ fn remote(url: &str, model: &str, key: &str, pcm: &[f32], lang: &str) -> Result<
     let mut body = Vec::new();
     let mut field = |name: &str, value: &str| {
         body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
-                .as_bytes(),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
         );
     };
     field("model", model);
@@ -285,7 +313,9 @@ fn remote(url: &str, model: &str, key: &str, pcm: &[f32], lang: &str) -> Result<
     if !key.is_empty() {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
-    let resp = req.send(&body[..]).with_context(|| format!("contacting {url}"))?;
+    let resp = req
+        .send(&body[..])
+        .with_context(|| format!("contacting {url}"))?;
     let mut resp = check(resp)?;
     let text = resp.body_mut().read_to_string()?;
     let dur = (pcm.len() / (SAMPLE_RATE / 1000)) as i64;
@@ -293,7 +323,15 @@ fn remote(url: &str, model: &str, key: &str, pcm: &[f32], lang: &str) -> Result<
         Ok(v) => v,
         Err(_) => {
             let t = text.trim().to_string();
-            return Ok(if t.is_empty() { vec![] } else { vec![AsrSeg { start_ms: 0, end_ms: dur, text: t }] });
+            return Ok(if t.is_empty() {
+                vec![]
+            } else {
+                vec![AsrSeg {
+                    start_ms: 0,
+                    end_ms: dur,
+                    text: t,
+                }]
+            });
         }
     };
     let mut out = Vec::new();
@@ -304,13 +342,21 @@ fn remote(url: &str, model: &str, key: &str, pcm: &[f32], lang: &str) -> Result<
                 continue;
             }
             let ms = |k: &str| (s[k].as_f64().unwrap_or(0.0) * 1000.0) as i64;
-            out.push(AsrSeg { start_ms: ms("start"), end_ms: ms("end").max(ms("start") + 300), text });
+            out.push(AsrSeg {
+                start_ms: ms("start"),
+                end_ms: ms("end").max(ms("start") + 300),
+                text,
+            });
         }
     } else {
         let text = v["text"].as_str().unwrap_or("").trim().to_string();
         let text = strip_language_tag(&text);
         if !text.is_empty() {
-            out.push(AsrSeg { start_ms: 0, end_ms: dur, text });
+            out.push(AsrSeg {
+                start_ms: 0,
+                end_ms: dur,
+                text,
+            });
         }
     }
     Ok(out)
@@ -443,7 +489,8 @@ pub fn resegment(segs: Vec<AsrSeg>, cjk: bool) -> Vec<AsrSeg> {
 
 fn split_into(s: AsrSeg, cjk: bool, max_chars: usize, out: &mut Vec<AsrSeg>) {
     let chars: Vec<char> = s.text.chars().collect();
-    let long = chars.len() > max_chars || s.end_ms - s.start_ms > MAX_CUE_MS && chars.len() > max_chars / 3;
+    let long = chars.len() > max_chars
+        || s.end_ms - s.start_ms > MAX_CUE_MS && chars.len() > max_chars / 3;
     if !long || chars.len() < 8 {
         out.push(s);
         return;
@@ -452,7 +499,12 @@ fn split_into(s: AsrSeg, cjk: bool, max_chars: usize, out: &mut Vec<AsrSeg>) {
     let strong = |c: char| matches!(c, '.' | '?' | '!' | '。' | '？' | '！' | '；' | ';');
     let weak = |c: char| matches!(c, ',' | '，' | '、' | ':' | '：' | '—');
     let mut best: Option<(usize, usize)> = None;
-    for (i, &c) in chars.iter().enumerate().skip(2).take(chars.len().saturating_sub(4)) {
+    for (i, &c) in chars
+        .iter()
+        .enumerate()
+        .skip(2)
+        .take(chars.len().saturating_sub(4))
+    {
         let rank = if strong(c) {
             0
         } else if weak(c) {
@@ -480,9 +532,28 @@ fn split_into(s: AsrSeg, cjk: bool, max_chars: usize, out: &mut Vec<AsrSeg>) {
         return;
     }
     let total = (left.chars().count() + right.chars().count()) as f64;
-    let at = s.start_ms + ((s.end_ms - s.start_ms) as f64 * left.chars().count() as f64 / total) as i64;
-    split_into(AsrSeg { start_ms: s.start_ms, end_ms: at, text: left }, cjk, max_chars, out);
-    split_into(AsrSeg { start_ms: at, end_ms: s.end_ms, text: right }, cjk, max_chars, out);
+    let at =
+        s.start_ms + ((s.end_ms - s.start_ms) as f64 * left.chars().count() as f64 / total) as i64;
+    split_into(
+        AsrSeg {
+            start_ms: s.start_ms,
+            end_ms: at,
+            text: left,
+        },
+        cjk,
+        max_chars,
+        out,
+    );
+    split_into(
+        AsrSeg {
+            start_ms: at,
+            end_ms: s.end_ms,
+            text: right,
+        },
+        cjk,
+        max_chars,
+        out,
+    );
 }
 
 #[cfg(test)]
@@ -512,7 +583,11 @@ mod tests {
 
     #[test]
     fn utterances_follow_pauses() {
-        let tone = |ms: usize| (0..ms * 16).map(|i| (i as f32 * 0.05).sin() * 0.3).collect::<Vec<f32>>();
+        let tone = |ms: usize| {
+            (0..ms * 16)
+                .map(|i| (i as f32 * 0.05).sin() * 0.3)
+                .collect::<Vec<f32>>()
+        };
         let quiet = |ms: usize| vec![0.0005f32; ms * 16];
         let pcm = [quiet(1000), tone(2000), quiet(1200), tone(3000), quiet(800)].concat();
         let u = split_utterances(&pcm, 12_000);

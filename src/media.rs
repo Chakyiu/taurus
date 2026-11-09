@@ -21,7 +21,8 @@ pub fn tool(name: &str) -> Option<PathBuf> {
 }
 
 fn need(name: &str) -> Result<PathBuf> {
-    tool(name).ok_or_else(|| anyhow!("{name} is not installed. Install it with `brew install ffmpeg`"))
+    tool(name)
+        .ok_or_else(|| anyhow!("{name} is not installed. Install it with `brew install ffmpeg`"))
 }
 
 #[derive(Clone, Debug)]
@@ -53,16 +54,28 @@ pub struct Probe {
     pub audio: Vec<AudioTrack>,
 }
 
-const TEXT_SUBS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "tx3g"];
+const TEXT_SUBS: &[&str] = &[
+    "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text", "tx3g",
+];
 
 pub fn probe(path: &Path) -> Result<Probe> {
     let out = Command::new(need("ffprobe")?)
-        .args(["-v", "error", "-print_format", "json", "-show_streams", "-show_format"])
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+        ])
         .arg(path)
         .output()
         .context("running ffprobe")?;
     if !out.status.success() {
-        bail!("{}", first_line(&out.stderr).unwrap_or("ffprobe could not read this file".into()));
+        bail!(
+            "{}",
+            first_line(&out.stderr).unwrap_or("ffprobe could not read this file".into())
+        );
     }
     let v: Value = serde_json::from_slice(&out.stdout).context("reading ffprobe output")?;
     let mut probe = Probe {
@@ -132,7 +145,10 @@ pub fn extract_subtitle(path: &Path, stream: usize) -> Result<Vec<crate::data::S
         .output()
         .context("running ffmpeg")?;
     if !out.status.success() {
-        bail!("{}", first_line(&out.stderr).unwrap_or("ffmpeg could not read that track".into()));
+        bail!(
+            "{}",
+            first_line(&out.stderr).unwrap_or("ffmpeg could not read that track".into())
+        );
     }
     subs::parse("track.srt", &String::from_utf8_lossy(&out.stdout))
 }
@@ -145,11 +161,24 @@ pub fn decode_audio(
     mut progress: impl FnMut(i64),
     cancelled: impl Fn() -> bool,
 ) -> Result<Vec<f32>> {
-    let map = stream.map(|s| format!("0:{s}")).unwrap_or_else(|| "0:a:0".into());
+    let map = stream
+        .map(|s| format!("0:{s}"))
+        .unwrap_or_else(|| "0:a:0".into());
     let mut child = Command::new(need("ffmpeg")?)
         .args(["-nostdin", "-v", "error", "-i"])
         .arg(path)
-        .args(["-map", &map, "-vn", "-ac", "1", "-ar", &SAMPLE_RATE.to_string(), "-f", "f32le", "-"])
+        .args([
+            "-map",
+            &map,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            &SAMPLE_RATE.to_string(),
+            "-f",
+            "f32le",
+            "-",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -175,7 +204,10 @@ pub fn decode_audio(
         if let Some(mut e) = child.stderr.take() {
             let _ = e.read_to_end(&mut err);
         }
-        bail!("{}", first_line(&err).unwrap_or("ffmpeg could not decode the audio".into()));
+        bail!(
+            "{}",
+            first_line(&err).unwrap_or("ffmpeg could not decode the audio".into())
+        );
     }
     Ok(bytes
         .chunks_exact(4)

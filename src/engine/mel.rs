@@ -21,7 +21,9 @@ pub struct Mel {
 
 impl Mel {
     pub fn new(n_mels: usize, sample_rate: f32, fmax: f32) -> Mel {
-        let window = (0..N_FFT).map(|n| 0.5 - 0.5 * (2.0 * PI * n as f32 / N_FFT as f32).cos()).collect();
+        let window = (0..N_FFT)
+            .map(|n| 0.5 - 0.5 * (2.0 * PI * n as f32 / N_FFT as f32).cos())
+            .collect();
         Mel {
             n_mels,
             filters: slaney_filters(n_mels, sample_rate, 0.0, fmax),
@@ -37,7 +39,9 @@ impl Mel {
     /// Returns `[n_mels, frames]` row-major and the frame count.
     pub fn compute(&self, pcm: &[f32]) -> (Vec<f32>, usize) {
         let pad = N_FFT / 2;
-        let padded: Vec<f32> = (0..pcm.len() + 2 * pad).map(|i| reflect(pcm, i as isize - pad as isize)).collect();
+        let padded: Vec<f32> = (0..pcm.len() + 2 * pad)
+            .map(|i| reflect(pcm, i as isize - pad as isize))
+            .collect();
         let frames = (padded.len() - N_FFT) / HOP + 1;
         let kept = frames.saturating_sub(1).max(1);
         let mut power = vec![0f32; BINS];
@@ -46,7 +50,10 @@ impl Mel {
         for f in 0..kept {
             let at = f * HOP;
             for (i, c) in buf.iter_mut().enumerate() {
-                *c = Complex32::new(padded.get(at + i).copied().unwrap_or(0.0) * self.window[i], 0.0);
+                *c = Complex32::new(
+                    padded.get(at + i).copied().unwrap_or(0.0) * self.window[i],
+                    0.0,
+                );
             }
             self.fft.process(&mut buf);
             for (k, p) in power.iter_mut().enumerate() {
@@ -87,7 +94,11 @@ fn hz_to_mel(hz: f32) -> f32 {
     let min_log_hz = 1000.0;
     let min_log_mel = min_log_hz / f_sp;
     let logstep = 6.4f32.ln() / 27.0;
-    if hz >= min_log_hz { min_log_mel + (hz / min_log_hz).ln() / logstep } else { hz / f_sp }
+    if hz >= min_log_hz {
+        min_log_mel + (hz / min_log_hz).ln() / logstep
+    } else {
+        hz / f_sp
+    }
 }
 
 fn mel_to_hz(mel: f32) -> f32 {
@@ -95,12 +106,18 @@ fn mel_to_hz(mel: f32) -> f32 {
     let min_log_hz = 1000.0;
     let min_log_mel = min_log_hz / f_sp;
     let logstep = 6.4f32.ln() / 27.0;
-    if mel >= min_log_mel { min_log_hz * (logstep * (mel - min_log_mel)).exp() } else { f_sp * mel }
+    if mel >= min_log_mel {
+        min_log_hz * (logstep * (mel - min_log_mel)).exp()
+    } else {
+        f_sp * mel
+    }
 }
 
 fn slaney_filters(n_mels: usize, sr: f32, fmin: f32, fmax: f32) -> Vec<f32> {
     let (lo, hi) = (hz_to_mel(fmin), hz_to_mel(fmax));
-    let pts: Vec<f32> = (0..n_mels + 2).map(|i| mel_to_hz(lo + (hi - lo) * i as f32 / (n_mels + 1) as f32)).collect();
+    let pts: Vec<f32> = (0..n_mels + 2)
+        .map(|i| mel_to_hz(lo + (hi - lo) * i as f32 / (n_mels + 1) as f32))
+        .collect();
     let freqs: Vec<f32> = (0..BINS).map(|k| k as f32 * sr / N_FFT as f32).collect();
     let mut w = vec![0f32; n_mels * BINS];
     for m in 0..n_mels {

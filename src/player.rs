@@ -27,7 +27,9 @@ impl Player {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| anyhow!("no speaker or headphones are connected"))?;
-        let config = device.default_output_config().context("reading the output format")?;
+        let config = device
+            .default_output_config()
+            .context("reading the output format")?;
         let channels = config.channels() as usize;
         let step = SAMPLE_RATE as f64 / config.sample_rate() as f64;
         let err = |e: cpal::Error| eprintln!("taurus: playback: {e}");
@@ -50,7 +52,8 @@ impl Player {
                     r.store(false, Ordering::Relaxed);
                     at = p.len() as f64;
                 }
-                let _ = q.compare_exchange(start, at.to_bits(), Ordering::Relaxed, Ordering::Relaxed);
+                let _ =
+                    q.compare_exchange(start, at.to_bits(), Ordering::Relaxed, Ordering::Relaxed);
             }
         };
         let stream = match config.sample_format() {
@@ -67,7 +70,10 @@ impl Player {
                 config.into(),
                 move |data: &mut [i16], _: &_| {
                     let n = data.len() / channels;
-                    render(&mut |i, v| data[i] = (v.clamp(-1.0, 1.0) * 32767.0) as i16, n)
+                    render(
+                        &mut |i, v| data[i] = (v.clamp(-1.0, 1.0) * 32767.0) as i16,
+                        n,
+                    )
                 },
                 err,
                 None,

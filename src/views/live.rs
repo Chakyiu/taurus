@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Div, Window, HighlightStyle, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, StyledText, UnderlineStyle, div, px, relative,
+    AnyElement, Context, Div, HighlightStyle, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, StyledText, UnderlineStyle, Window, div, px, relative,
 };
 
 use crate::app::*;
@@ -111,9 +111,17 @@ impl Workbench {
             .child(if running {
                 pulse_dot("rec-dot", t::accent(), 8.)
             } else {
-                div().size(px(8.)).rounded_full().bg(t::warn()).into_any_element()
+                div()
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(t::warn())
+                    .into_any_element()
             })
-            .child(Self::strip_title(if running { "Recording" } else { "Paused" }))
+            .child(Self::strip_title(if running {
+                "Recording"
+            } else {
+                "Paused"
+            }))
             .child(
                 mono(div())
                     .flex_none()
@@ -133,28 +141,63 @@ impl Workbench {
                     .text_ellipsis()
                     .when(!bp.mobile(), |d| d.child(note)),
             )
-            .child(if running && self.live.session.as_ref().is_some_and(|s| s.records_video()) {
-                div().into_any_element()
-            } else if running {
-                button("live-pause", Btn::Quiet, Some(Icon::Pause), Some("Pause"), false)
+            .child(
+                if running
+                    && self
+                        .live
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.records_video())
+                {
+                    div().into_any_element()
+                } else if running {
+                    button(
+                        "live-pause",
+                        Btn::Quiet,
+                        Some(Icon::Pause),
+                        Some("Pause"),
+                        false,
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.pause_live(cx)))
                     .into_any_element()
-            } else {
-                button("live-resume", Btn::Quiet, Some(Icon::Play), Some("Resume"), false)
+                } else {
+                    button(
+                        "live-resume",
+                        Btn::Quiet,
+                        Some(Icon::Play),
+                        Some("Resume"),
+                        false,
+                    )
                     .on_click(cx.listener(|this, _, w, cx| this.start_live(w, cx)))
                     .into_any_element()
-            })
+                },
+            )
             .child(
-                button("live-stop", Btn::Ghost, Some(Icon::Stop), Some("Stop"), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.stop_live(cx))),
+                button(
+                    "live-stop",
+                    Btn::Ghost,
+                    Some(Icon::Stop),
+                    Some("Stop"),
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.stop_live(cx))),
             )
             .into_any_element()
     }
 
     /// "Spoken in", then an opt-in translation and its language.
-    pub(crate) fn lang_pair(&self, from: Sel, to: Sel, disabled: bool, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn lang_pair(
+        &self,
+        from: Sel,
+        to: Sel,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let on = self.settings.translate;
-        let from_sel = div().flex_1().min_w_0().child(field("Spoken in", self.render_select(from, px(0.), disabled, cx)));
+        let from_sel = div().flex_1().min_w_0().child(field(
+            "Spoken in",
+            self.render_select(from, px(0.), disabled, cx),
+        ));
         col()
             .gap(px(12.))
             .child(
@@ -164,9 +207,10 @@ impl Workbench {
                     .child(from_sel)
                     .when(on && from == Sel::LiveFrom, |d| {
                         d.child(
-                            button("live-swap", Btn::Icon, Some(Icon::Swap), None, disabled).when(!disabled, |d| {
-                                d.on_click(cx.listener(|this, _, _, cx| this.swap_langs(cx)))
-                            }),
+                            button("live-swap", Btn::Icon, Some(Icon::Swap), None, disabled)
+                                .when(!disabled, |d| {
+                                    d.on_click(cx.listener(|this, _, _, cx| this.swap_langs(cx)))
+                                }),
                         )
                     })
                     .when(on, |d| {
@@ -177,8 +221,14 @@ impl Workbench {
                     }),
             )
             .child(
-                switch(SharedString::from(format!("translate-{from:?}")), on, "Translate the lines")
-                    .when(!disabled, |d| d.on_click(cx.listener(|this, _, _, cx| this.toggle_translate_default(cx)))),
+                switch(
+                    SharedString::from(format!("translate-{from:?}")),
+                    on,
+                    "Translate the lines",
+                )
+                .when(!disabled, |d| {
+                    d.on_click(cx.listener(|this, _, _, cx| this.toggle_translate_default(cx)))
+                }),
             )
     }
 
@@ -197,7 +247,9 @@ impl Workbench {
                         )))
                         .child(
                             button("prof-cancel", Btn::Ghost, None, Some("Cancel"), false)
-                                .on_click(cx.listener(|this, _, _, cx| this.cancel_profile_name(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_profile_name(cx)),
+                                ),
                         )
                         .child(
                             button("prof-save", Btn::Primary, None, Some("Save profile"), false)
@@ -212,22 +264,38 @@ impl Workbench {
             .gap(px(8.))
             .child(div().flex_1().min_w_0().child(field(
                 "Profile",
-                self.render_select(Sel::Profile, px(0.), !idle || self.settings.profiles.is_empty(), cx),
+                self.render_select(
+                    Sel::Profile,
+                    px(0.),
+                    !idle || self.settings.profiles.is_empty(),
+                    cx,
+                ),
             )))
             .when(picked && self.profile_changed(), |d| {
                 d.child(
                     button("prof-update", Btn::Ghost, None, Some("Update"), !idle)
-                        .when(idle, |d| d.on_click(cx.listener(|this, _, _, cx| this.update_profile(cx)))),
+                        .when(idle, |d| {
+                            d.on_click(cx.listener(|this, _, _, cx| this.update_profile(cx)))
+                        }),
                 )
             })
             .child(
-                button("prof-new", Btn::Ghost, Some(Icon::Plus), Some("Save as…"), !idle)
-                    .when(idle, |d| d.on_click(cx.listener(|this, _, w, cx| this.begin_profile_name(w, cx)))),
+                button(
+                    "prof-new",
+                    Btn::Ghost,
+                    Some(Icon::Plus),
+                    Some("Save as…"),
+                    !idle,
+                )
+                .when(idle, |d| {
+                    d.on_click(cx.listener(|this, _, w, cx| this.begin_profile_name(w, cx)))
+                }),
             )
             .when(picked, |d| {
                 d.child(
-                    button("prof-del", Btn::Icon, Some(Icon::Trash), None, !idle)
-                        .when(idle, |d| d.on_click(cx.listener(|this, _, _, cx| this.delete_profile(cx)))),
+                    button("prof-del", Btn::Icon, Some(Icon::Trash), None, !idle).when(idle, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.delete_profile(cx)))
+                    }),
                 )
             })
     }

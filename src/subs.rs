@@ -40,10 +40,16 @@ fn parse_cues(text: &str, vtt: bool) -> Vec<Segment> {
         let Some(ti) = lines.iter().position(|l| l.contains("-->")) else {
             continue;
         };
-        if vtt && lines.first().is_some_and(|l| l.starts_with("NOTE") || l.starts_with("STYLE")) {
+        if vtt
+            && lines
+                .first()
+                .is_some_and(|l| l.starts_with("NOTE") || l.starts_with("STYLE"))
+        {
             continue;
         }
-        let Some((a, b)) = lines[ti].split_once("-->") else { continue };
+        let Some((a, b)) = lines[ti].split_once("-->") else {
+            continue;
+        };
         let b = b.split_whitespace().next().unwrap_or("");
         let (Some(in_ms), Some(out_ms)) = (parse_time(a.trim()), parse_time(b)) else {
             continue;
@@ -77,10 +83,15 @@ fn parse_ass(text: &str) -> Vec<Segment> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("Format:") {
-            fields = rest.split(',').map(|f| f.trim().to_ascii_lowercase()).collect();
+            fields = rest
+                .split(',')
+                .map(|f| f.trim().to_ascii_lowercase())
+                .collect();
             continue;
         }
-        let Some(rest) = line.strip_prefix("Dialogue:") else { continue };
+        let Some(rest) = line.strip_prefix("Dialogue:") else {
+            continue;
+        };
         if fields.is_empty() {
             fields = "layer,start,end,style,name,marginl,marginr,marginv,effect,text"
                 .split(',')
@@ -88,7 +99,12 @@ fn parse_ass(text: &str) -> Vec<Segment> {
                 .collect();
         }
         let parts: Vec<&str> = rest.splitn(fields.len(), ',').collect();
-        let get = |name: &str| fields.iter().position(|f| f == name).and_then(|i| parts.get(i));
+        let get = |name: &str| {
+            fields
+                .iter()
+                .position(|f| f == name)
+                .and_then(|i| parts.get(i))
+        };
         let (Some(a), Some(b), Some(t)) = (get("start"), get("end"), get("text")) else {
             continue;
         };
@@ -141,7 +157,11 @@ fn strip_tags(line: &str) -> String {
             _ => {}
         }
     }
-    let out = out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ");
+    let out = out
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ");
     strip_braces(&out).trim().to_string()
 }
 

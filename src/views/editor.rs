@@ -2,16 +2,17 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, Div, Focusable as _, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
+    Animation, AnimationExt as _, AnyElement, Context, Div, Focusable as _, HighlightStyle,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled,
+    StyledImage as _, StyledText, Window, canvas, div, img, px, relative, rgb, rgba,
 };
 use gpui_component::input::Input;
 
 use super::screen;
 use crate::app::*;
 use crate::data::*;
-use crate::icons::Icon;
+use crate::icons::{Icon, icon};
 use crate::shell::{Bp, ring_shadow};
 use crate::theme::{self as t, weight};
 use crate::ui::*;
@@ -34,9 +35,19 @@ impl Workbench {
                 .child(empty_state(
                     "No project open",
                     "Pick one from the list, or start something new.",
-                    vec![button("ed-go-projects", Btn::Primary, None, Some("Projects"), false)
-                        .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)))
-                        .into_any_element()],
+                    vec![
+                        button(
+                            "ed-go-projects",
+                            Btn::Primary,
+                            None,
+                            Some("Projects"),
+                            false,
+                        )
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)),
+                        )
+                        .into_any_element(),
+                    ],
                 ))
                 .into_any_element();
         };
@@ -44,6 +55,7 @@ impl Workbench {
         let capturing = self.live.project_id.as_deref() == Some(pid.as_str())
             && self.live.status != LiveStatus::Idle;
         let extracting = self.extracting(&pid);
+        let fixes = p.segs.iter().filter(|s| s.fix.is_some()).count();
 
         let strip = if capturing {
             Some(self.live_strip(bp, cx))
@@ -53,6 +65,10 @@ impl Workbench {
             || self.speaker_pending.as_deref() == Some(pid.as_str())
         {
             Some(self.speaker_strip(bp, cx))
+        } else if self.correcting.as_ref().is_some_and(|j| j.pid == pid) {
+            Some(self.correct_strip(bp, cx))
+        } else if fixes > 0 {
+            Some(self.fixes_strip(fixes, bp, cx))
         } else if p.status == Status::Failed {
             Some(self.failed_strip(p, bp, cx))
         } else {
@@ -61,10 +77,9 @@ impl Workbench {
 
         let body: AnyElement = if p.segs.is_empty() {
             let text = if capturing {
-                self.live
-                    .engine_note
-                    .clone()
-                    .unwrap_or_else(|| "Listening. Lines appear here as soon as someone speaks.".into())
+                self.live.engine_note.clone().unwrap_or_else(|| {
+                    "Listening. Lines appear here as soon as someone speaks.".into()
+                })
             } else if extracting {
                 "Lines appear here as soon as the track is read.".into()
             } else {
@@ -85,26 +100,151 @@ impl Workbench {
 
         let show_summary = self.summary_job.as_ref().is_some_and(|j| j.pid == pid)
             || self.current().is_some_and(|p| !p.summary.trim().is_empty());
-        let transport = self.audio_source(p).map(|_| self.transport(bp, cx));
+        let show_video = self.video_file(p).is_some();
         screen()
             .children(strip)
-            .when(!p.segs.is_empty() && !capturing, |d| d.child(self.toolbar(bp, cx)))
-            .when(show_summary && !capturing, |d| d.child(self.summary_panel(bp, cx)))
+            .when(!p.segs.is_empty() && !capturing, |d| {
+                d.child(self.toolbar(bp, cx))
+            })
+            .when(show_summary && !capturing, |d| {
+                d.child(self.summary_panel(bp, cx))
+            })
+            .when(show_video, |d| {
+                d.child(self.video_stage(bp, cx))
+                    .children(self.audio_source(p).map(|_| self.transport(bp, cx)))
+            })
             .child(body)
-            .children(transport)
+            .when(!show_video, |d| {
+                d.children(self.audio_source(p).map(|_| self.transport(bp, cx)))
+            })
+            .into_any_element()
+    }
+
+    /// The picture for this project, with the cue at the playhead drawn on it.
+    fn video_stage(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        let frame = self.video_frame.clone();
+        let error = self.video.as_ref().and_then(|v| v.error());
+        let (ms, playing) = self.playback_clock();
+        let caption = self.current().and_then(|p| {
+            let seg = p.segs.iter().find(|s| s.in_ms <= ms && ms < s.out_ms)?;
+            crate::video::overlay_line(p.translate, &seg.orig, &seg.trans)
+        });
+        let can_play = self
+            .current()
+            .is_some_and(|p| self.audio_source(p).is_some());
+        let h = if bp.mobile() { 188. } else { 300. };
+        div()
+            .id("video-stage")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .mx(bp.pad_x())
+            .mt(px(8.))
+            .h(px(h))
+            .rounded(t::R_LG)
+            .bg(rgb(0x05080A))
+            .overflow_hidden()
+            .when(can_play, |d| {
+                d.cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.play(None, cx)))
+            })
+            .when_some(frame, |d, frame| {
+                d.child(img(frame).flex_1().w_full().object_fit(ObjectFit::Contain))
+            })
+            .when(self.video_frame.is_none(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(24.))
+                        .text_size(t::T_SMALL)
+                        .text_color(t::text_2())
+                        .text_center()
+                        .child(error.unwrap_or_else(|| "Loading the video…".into())),
+                )
+            })
+            .when(self.video_frame.is_some() && can_play && !playing, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(52.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgba(0x05080AB8))
+                                .child(icon(Icon::Play, px(22.), rgb(0xffffff).into())),
+                        ),
+                )
+            })
+            .when_some(caption, |d, line| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom(px(12.))
+                        .left(px(16.))
+                        .right(px(16.))
+                        .child(
+                            div()
+                                .w_full()
+                                .px(px(14.))
+                                .py(px(7.))
+                                .rounded(t::R)
+                                .bg(rgba(0x05080AD9))
+                                .text_center()
+                                .when_some(line.secondary, |d, text| {
+                                    d.child(
+                                        div()
+                                            .text_size(px(13.5))
+                                            .line_height(relative(1.35))
+                                            .text_color(rgb(0xC3D0DA))
+                                            .child(text),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .text_size(px(18.))
+                                        .font_weight(weight(550.))
+                                        .line_height(relative(1.35))
+                                        .text_color(rgb(0xffffff))
+                                        .child(line.primary),
+                                ),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
     fn summary_panel(&self, bp: Bp, cx: &mut Context<Self>) -> Div {
-        let Some(p) = self.current() else { return div() };
-        let writing = self.summary_job.as_ref().filter(|j| j.pid == p.id).map(|j| {
-            let step = match (j.done, j.parts) {
-                (_, 0 | 1) => String::new(),
-                (done, parts) if done < parts => format!(", part {} of {parts}", done + 1),
-                (_, parts) => format!(", joining the {parts} parts"),
-            };
-            format!("Writing a summary in {} with {}{step}…", lang_name(&j.lang), j.model)
-        });
+        let Some(p) = self.current() else {
+            return div();
+        };
+        let writing = self
+            .summary_job
+            .as_ref()
+            .filter(|j| j.pid == p.id)
+            .map(|j| {
+                let step = match (j.done, j.parts) {
+                    (_, 0 | 1) => String::new(),
+                    (done, parts) if done < parts => format!(", part {} of {parts}", done + 1),
+                    (_, parts) => format!(", joining the {parts} parts"),
+                };
+                format!(
+                    "Writing a summary in {} with {}{step}…",
+                    lang_name(&j.lang),
+                    j.model
+                )
+            });
         let text = p.summary.trim().to_string();
         let meta = summary_meta(p);
         col()
@@ -137,9 +277,10 @@ impl Workbench {
                         )
                     })
                     .when(!text.is_empty(), |d| {
-                        d.child(link_button("sum-copy", "Copy").on_click(cx.listener(|this, _, _, cx| {
-                            this.copy_summary(cx)
-                        })))
+                        d.child(
+                            link_button("sum-copy", "Copy")
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_summary(cx))),
+                        )
                     }),
             )
             .when_some(meta, |d, m| {
@@ -156,9 +297,15 @@ impl Workbench {
                     .track_scroll(&self.summary_scroll)
                     .text_size(px(15.))
                     .line_height(relative(1.55))
-                    .text_color(if text.is_empty() { t::text_2() } else { t::text() })
+                    .text_color(if text.is_empty() {
+                        t::text_2()
+                    } else {
+                        t::text()
+                    })
                     .child(if text.is_empty() {
-                        writing.clone().unwrap_or_else(|| "Writing a summary of these lines…".into())
+                        writing
+                            .clone()
+                            .unwrap_or_else(|| "Writing a summary of these lines…".into())
                     } else {
                         text
                     }),
@@ -170,7 +317,9 @@ impl Workbench {
     }
 
     fn toolbar(&self, bp: Bp, cx: &mut Context<Self>) -> Div {
-        let Some(p) = self.current() else { return div() };
+        let Some(p) = self.current() else {
+            return div();
+        };
         let stats = project_stats(&self.glossary, p);
         let only = self.editor.review_only;
         let count = match stats.count {
@@ -192,32 +341,69 @@ impl Workbench {
             .child(count)
             .when(stats.flagged > 0 || only, |d| {
                 d.child(
-                    switch("ed-only", only, &format!("Only lines to check ({})", stats.flagged))
-                        .on_click(cx.listener(|this, _, w, cx| this.toggle_review_only(w, cx))),
+                    switch(
+                        "ed-only",
+                        only,
+                        &format!("Only lines to check ({})", stats.flagged),
+                    )
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_review_only(w, cx))),
                 )
             })
             .child(fill())
+            .map(|d| {
+                let busy = self.correcting.as_ref().is_some_and(|j| j.pid == p.id);
+                d.child(
+                    button(
+                        "ed-correct",
+                        Btn::Quiet,
+                        Some(Icon::Wand),
+                        Some(if busy { "Correcting…" } else { "Correct" }),
+                        busy,
+                    )
+                    .when(!busy, |d| {
+                        d.on_click(cx.listener(|this, _, w, cx| this.open_correct(w, cx)))
+                    }),
+                )
+            })
             .when(
-                p.summary.trim().is_empty() && self.summary_job.as_ref().is_none_or(|j| j.pid != p.id),
+                p.summary.trim().is_empty()
+                    && self.summary_job.as_ref().is_none_or(|j| j.pid != p.id),
                 |d| {
                     d.child(
-                        button("ed-summarize", Btn::Quiet, Some(Icon::Summary), Some("Summarize"), false)
-                            .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
+                        button(
+                            "ed-summarize",
+                            Btn::Quiet,
+                            Some(Icon::Summary),
+                            Some("Summarize"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
                     )
                 },
             )
-            .when(self.summary_job.as_ref().is_some_and(|j| j.pid == p.id), |d| {
-                d.child(
-                    button("ed-summarize", Btn::Quiet, Some(Icon::Summary), Some("Summarizing…"), true),
-                )
-            })
+            .when(
+                self.summary_job.as_ref().is_some_and(|j| j.pid == p.id),
+                |d| {
+                    d.child(button(
+                        "ed-summarize",
+                        Btn::Quiet,
+                        Some(Icon::Summary),
+                        Some("Summarizing…"),
+                        true,
+                    ))
+                },
+            )
             .when(can_identify, |d| {
                 d.child(
                     button(
                         "ed-speakers",
                         Btn::Quiet,
                         Some(Icon::Users),
-                        Some(if p.has_speakers() { "Identify again" } else { "Identify speakers" }),
+                        Some(if p.has_speakers() {
+                            "Identify again"
+                        } else {
+                            "Identify speakers"
+                        }),
                         false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.identify_speakers(cx))),
@@ -225,26 +411,52 @@ impl Workbench {
             })
             .when(p.video_path.is_some() && p.status != Status::Live, |d| {
                 d.child(
-                    button("ed-video", Btn::Quiet, Some(Icon::Film), Some("Open video"), false)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_video(cx))),
+                    button(
+                        "ed-video",
+                        Btn::Quiet,
+                        Some(Icon::Film),
+                        Some("Open video"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_video(cx))),
                 )
             })
             .when(p.kind == Kind::Audio && p.source_path.is_some(), |d| {
                 d.child(
-                    button("ed-audio", Btn::Quiet, Some(Icon::Waveform), Some("Show audio"), false)
-                        .on_click(cx.listener(|this, _, _, cx| this.reveal_recording(cx))),
+                    button(
+                        "ed-audio",
+                        Btn::Quiet,
+                        Some(Icon::Waveform),
+                        Some("Show audio"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.reveal_recording(cx))),
                 )
             })
             .when(!p.translate && p.status != Status::Working, |d| {
                 d.child(
-                    button("ed-translate", Btn::Quiet, Some(Icon::Translate), Some("Translate"), false)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_translate(cx))),
+                    button(
+                        "ed-translate",
+                        Btn::Quiet,
+                        Some(Icon::Translate),
+                        Some("Translate"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_translate(cx))),
                 )
             })
             .when(p.translate && p.status != Status::Working, |d| {
                 d.child(
-                    button("ed-retranslate-all", Btn::Quiet, Some(Icon::Refresh), Some("Retranslate all"), false)
-                        .on_click(cx.listener(move |this, _, w, cx| this.retranslate(all.clone(), w, cx))),
+                    button(
+                        "ed-retranslate-all",
+                        Btn::Quiet,
+                        Some(Icon::Refresh),
+                        Some("Retranslate all"),
+                        false,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, w, cx| this.retranslate(all.clone(), w, cx)),
+                    ),
                 )
             })
     }
@@ -256,7 +468,9 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(p) = self.current() else { return div().into_any_element() };
+        let Some(p) = self.current() else {
+            return div().into_any_element();
+        };
         let rows = self.visible_rows();
         let none_left = rows.is_empty();
         let stacked = bp.w <= 760.;
@@ -272,11 +486,25 @@ impl Workbench {
             .pb(px(32.))
             .children(rows.into_iter().map(|(i, flags)| {
                 let here = playing == Some(i);
-                self.line_row(bp, stacked, i, &p.segs[i], &flags, translating, focused, here, cx)
+                self.line_row(
+                    bp,
+                    stacked,
+                    i,
+                    &p.segs[i],
+                    &flags,
+                    translating,
+                    focused,
+                    here,
+                    cx,
+                )
             }))
             .children(capturing.then(|| self.heard_line(bp)).flatten())
             .when(none_left, |d| {
-                d.child(hint("Every line reads well now.").px(bp.pad_x()).py(px(20.)))
+                d.child(
+                    hint("Every line reads well now.")
+                        .px(bp.pad_x())
+                        .py(px(20.)),
+                )
             });
         with_scroll_bar("lines-frame", list, &self.lines_scroll)
             .flex_1()
@@ -298,32 +526,44 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.editor.active == Some(i);
-        let Some(p) = self.current() else { return div().into_any_element() };
+        let Some(p) = self.current() else {
+            return div().into_any_element();
+        };
         let can_play = self.audio_source(p).is_some();
         let translated = p.translate;
-        let speaker = s.speaker.filter(|n| i == 0 || p.segs[i - 1].speaker != Some(*n)).map(|n| {
-            row()
-                .id(("spk", i))
-                .gap(px(6.))
-                .pl(px(TIME_W + RAIL_W + 24. + if translated { 0. } else { 9. }))
-                .pb(px(2.))
-                .text_size(px(12.5))
-                .font_weight(weight(560.))
-                .text_color(t::text_2())
-                .cursor_pointer()
-                .hover(|s| s.text_color(t::text()))
-                .child(div().size(px(7.)).rounded_full().bg(speaker_color(n)))
-                .child(p.speaker_name(n))
-                .on_click(cx.listener(move |this, _, w, cx| {
-                    cx.stop_propagation();
-                    this.open_speaker_rename(n, w, cx)
-                }))
-        });
+        let speaker = s
+            .speaker
+            .filter(|n| i == 0 || p.segs[i - 1].speaker != Some(*n))
+            .map(|n| {
+                row()
+                    .id(("spk", i))
+                    .gap(px(6.))
+                    .pl(px(TIME_W + RAIL_W + 24. + if translated { 0. } else { 9. }))
+                    .pb(px(2.))
+                    .text_size(px(12.5))
+                    .font_weight(weight(560.))
+                    .text_color(t::text_2())
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(t::text()))
+                    .child(div().size(px(7.)).rounded_full().bg(speaker_color(n)))
+                    .child(p.speaker_name(n))
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        cx.stop_propagation();
+                        this.open_speaker_rename(n, w, cx)
+                    }))
+            });
         let at = s.in_ms;
         let issues: Vec<&Flag> = flags
             .iter()
-            .filter(|f| !matches!(f.kind, FlagKind::Ok | FlagKind::Term | FlagKind::Empty))
+            .filter(|f| {
+                !matches!(
+                    f.kind,
+                    FlagKind::Ok | FlagKind::Term | FlagKind::Empty | FlagKind::Fix
+                )
+            })
             .collect();
+        let fix = s.fix.as_deref().filter(|_| self.editor.editing != Some(i));
+        let cjk = crate::subs::is_cjk(&p.from);
 
         let time = mono(div())
             .id(("time", i))
@@ -347,14 +587,32 @@ impl Workbench {
                         this.play(Some(at), cx)
                     }))
             });
+        let heard = |this: &Self, cx: &mut Context<Self>| match fix {
+            Some(f) => this.fix_cell(i, &s.orig, f, cjk, false, cx),
+            None => div()
+                .text_size(px(15.))
+                .line_height(relative(1.55))
+                .text_color(t::text())
+                .child(s.orig.clone()),
+        };
         let texts = if !translated {
-            div().flex_1().min_w_0().child(self.text_cell(i, &s.orig, false, translating, focused, cx))
+            div().flex_1().min_w_0().child(match fix {
+                Some(f) => self
+                    .fix_cell(i, &s.orig, f, cjk, true, cx)
+                    .into_any_element(),
+                None => self.text_cell(i, &s.orig, false, translating, focused, cx),
+            })
         } else if stacked {
-            let orig = div().text_size(px(15.)).line_height(relative(1.55)).text_color(t::text()).child(s.orig.clone());
+            let orig = heard(self, cx);
             let trans = self.text_cell(i, &s.trans, true, translating, focused, cx);
-            col().flex_1().min_w_0().gap(px(4.)).child(orig).child(trans)
+            col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(4.))
+                .child(orig)
+                .child(trans)
         } else {
-            let orig = div().text_size(px(15.)).line_height(relative(1.55)).text_color(t::text()).child(s.orig.clone());
+            let orig = heard(self, cx);
             let trans = self.text_cell(i, &s.trans, true, translating, focused, cx);
             row()
                 .flex_1()
@@ -372,7 +630,13 @@ impl Workbench {
                 div()
                     .text_size(t::T_SMALL)
                     .text_color(t::warn_text())
-                    .child(issues.iter().map(|f| f.label.as_str()).collect::<Vec<_>>().join(" · ")),
+                    .child(
+                        issues
+                            .iter()
+                            .map(|f| f.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    ),
             )
         } else {
             None
@@ -382,40 +646,50 @@ impl Workbench {
             .id(("seg", i))
             .relative()
             .when(playing, |d| {
-                d.child(div().absolute().left_0().top_0().bottom_0().w(px(2.)).bg(t::accent()))
+                d.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(t::accent()),
+                )
             })
             .px(bp.pad_x())
             .py(px(8.))
             .border_b_1()
             .border_color(t::line_soft())
-            .map(|d| if active { d.bg(t::surface()) } else { d.hover(|s| s.bg(t::surface())) })
+            .map(|d| {
+                if active {
+                    d.bg(t::surface())
+                } else {
+                    d.hover(|s| s.bg(t::surface()))
+                }
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.activate_row(i, cx)))
             .children(speaker)
             .child(
-                row()
-                    .items_start()
-                    .gap(px(12.))
-                    .child(time)
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .when(p.has_speakers(), |d| {
-                                d.pl(px(RAIL_W + 12.)).child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .top(px(4.))
-                                        .bottom(px(4.))
-                                        .w(px(RAIL_W))
-                                        .rounded_full()
-                                        .when_some(s.speaker, |d, n| d.bg(speaker_color(n))),
-                                )
-                            })
-                            .child(texts),
-                    ),
+                row().items_start().gap(px(12.)).child(time).child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .when(p.has_speakers(), |d| {
+                            d.pl(px(RAIL_W + 12.)).child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(4.))
+                                    .bottom(px(4.))
+                                    .w(px(RAIL_W))
+                                    .rounded_full()
+                                    .when_some(s.speaker, |d, n| d.bg(speaker_color(n))),
+                            )
+                        })
+                        .child(texts),
+                ),
             )
             .when_some(note, |d, n| {
                 let rail = if p.has_speakers() { RAIL_W + 12. } else { 0. };
@@ -428,14 +702,28 @@ impl Workbench {
     /// The selected line's numbers, in one sentence, plus the one action
     /// that applies to a single line.
     fn line_checks(&self, i: usize, cx: &mut Context<Self>) -> Div {
-        let Some(p) = self.current() else { return div() };
+        let Some(p) = self.current() else {
+            return div();
+        };
         let s = &p.segs[i];
-        let text = if p.translate { s.trans.trim() } else { s.orig.trim() };
+        let text = if p.translate {
+            s.trans.trim()
+        } else {
+            s.orig.trim()
+        };
         let dur = ((s.out_ms - s.in_ms) as f64 / 1000.0).max(0.1);
-        let cps = if text.is_empty() { 0.0 } else { char_len(text) as f64 / dur };
+        let cps = if text.is_empty() {
+            0.0
+        } else {
+            char_len(text) as f64 / dur
+        };
         let longest = longest_line(text);
         let gap = p.segs.get(i + 1).map(|n| n.in_ms - s.out_ms);
-        let terms = if p.translate { terms_in(&self.glossary, &s.orig, Some(&p.id)) } else { Vec::new() };
+        let terms = if p.translate {
+            terms_in(&self.glossary, &s.orig, Some(&p.id))
+        } else {
+            Vec::new()
+        };
         let translated = p.translate;
 
         let part = |text: String, bad: bool| {
@@ -444,7 +732,10 @@ impl Workbench {
                 .child(text)
         };
         let mut parts = vec![
-            part(format!("{} → {}", srt_time(s.in_ms), srt_time(s.out_ms)), false),
+            part(
+                format!("{} → {}", srt_time(s.in_ms), srt_time(s.out_ms)),
+                false,
+            ),
             part(format!("{dur:.1} s"), false),
         ];
         if !text.is_empty() {
@@ -463,12 +754,14 @@ impl Workbench {
             .text_size(t::T_SMALL)
             .children(parts)
             .when(translated, |d| {
-                d.child(link_button(("retranslate", i), "Retranslate").on_click(cx.listener(
-                    move |this, _, w, cx| {
-                        cx.stop_propagation();
-                        this.retranslate(vec![i], w, cx)
-                    },
-                )))
+                d.child(
+                    link_button(("retranslate", i), "Retranslate").on_click(cx.listener(
+                        move |this, _, w, cx| {
+                            cx.stop_propagation();
+                            this.retranslate(vec![i], w, cx)
+                        },
+                    )),
+                )
             })
     }
 
@@ -538,13 +831,19 @@ impl Workbench {
             .line_height(relative(1.55))
             .map(|d| {
                 if empty {
-                    d.text_color(t::text_3()).child(match (translated, translating) {
-                        (true, true) => "Translating…",
-                        (true, false) => "Not translated",
-                        (false, _) => "Empty line",
-                    })
+                    d.text_color(t::text_3())
+                        .child(match (translated, translating) {
+                            (true, true) => "Translating…",
+                            (true, false) => "Not translated",
+                            (false, _) => "Empty line",
+                        })
                 } else {
-                    d.text_color(if translated { t::accent_text() } else { t::text() }).child(text.to_string())
+                    d.text_color(if translated {
+                        t::accent_text()
+                    } else {
+                        t::text()
+                    })
+                    .child(text.to_string())
                 }
             })
             .on_click(cx.listener(move |this, _, w, cx| {
@@ -558,14 +857,31 @@ impl Workbench {
     /// Play and pause, where the playhead is, and a bar to move it.
     fn transport(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
         let pid = self.project_id.clone().unwrap_or_default();
-        let pl = self.player.as_ref().filter(|(id, _)| *id == pid).map(|(_, pl)| pl);
-        let loading = self.player_loading.as_ref().is_some_and(|(id, _)| *id == pid);
+        let pl = self
+            .player
+            .as_ref()
+            .filter(|(id, _)| *id == pid)
+            .map(|(_, pl)| pl);
+        let loading = self
+            .player_loading
+            .as_ref()
+            .is_some_and(|(id, _)| *id == pid);
         let playing = pl.is_some_and(|p| p.is_playing());
         let (pos, dur) = match pl {
             Some(p) => (p.position_ms(), p.duration_ms()),
-            None => (0, self.current().and_then(|p| p.segs.last()).map(|s| s.out_ms).unwrap_or(0)),
+            None => (
+                0,
+                self.current()
+                    .and_then(|p| p.segs.last())
+                    .map(|s| s.out_ms)
+                    .unwrap_or(0),
+            ),
         };
-        let ratio = if dur > 0 { (pos as f32 / dur as f32).clamp(0., 1.) } else { 0. };
+        let ratio = if dur > 0 {
+            (pos as f32 / dur as f32).clamp(0., 1.)
+        } else {
+            0.
+        };
         let bounds = self.scrub_bounds.clone();
         let entity = cx.entity().downgrade();
         let scrubbing = self.scrubbing;
@@ -586,7 +902,8 @@ impl Workbench {
                         }
                         let e = entity.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, _, _, cx| {
-                            e.update(cx, |this, cx| this.seek_ratio(ev.position.x, cx)).ok();
+                            e.update(cx, |this, cx| this.seek_ratio(ev.position.x, cx))
+                                .ok();
                         });
                         let e = entity.clone();
                         window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
@@ -607,7 +924,13 @@ impl Workbench {
                     .h(px(3.))
                     .rounded_full()
                     .bg(t::surface_3())
-                    .child(div().h_full().w(relative(ratio)).rounded_full().bg(t::accent())),
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(ratio))
+                            .rounded_full()
+                            .bg(t::accent()),
+                    ),
             )
             .when(pl.is_some(), |d| {
                 d.child(
@@ -644,7 +967,9 @@ impl Workbench {
                     None,
                     loading,
                 )
-                .when(!loading, |d| d.on_click(cx.listener(|this, _, _, cx| this.play(None, cx)))),
+                .when(!loading, |d| {
+                    d.on_click(cx.listener(|this, _, _, cx| this.play(None, cx)))
+                }),
             )
             .child(
                 mono(div())
@@ -663,24 +988,170 @@ impl Workbench {
 
     fn speaker_strip(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
         let (title, note) = match &self.speaking {
-            Some(j) => ("Identifying speakers".to_string(), format!("{} of {} lines", j.done, j.total)),
+            Some(j) => (
+                "Identifying speakers".to_string(),
+                format!("{} of {} lines", j.done, j.total),
+            ),
             None => {
-                let pct = self.downloads.get(crate::engine::speaker::SPEAKER_DOWNLOAD_ID).map_or(0., |d| d.pct);
+                let pct = self
+                    .downloads
+                    .get(crate::engine::speaker::SPEAKER_DOWNLOAD_ID)
+                    .map_or(0., |d| d.pct);
                 (
                     "Fetching the speaker model".to_string(),
-                    format!("{:.0}% of {}, once only", pct * 100., crate::engine::speaker::SPEAKER_SIZE),
+                    format!(
+                        "{:.0}% of {}, once only",
+                        pct * 100.,
+                        crate::engine::speaker::SPEAKER_SIZE
+                    ),
                 )
             }
         };
         self.strip(bp)
             .child(Self::strip_title(title))
-            .child(mono(div()).flex_none().text_size(t::T_SMALL).text_color(t::text_2()).child(note))
+            .child(
+                mono(div())
+                    .flex_none()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(note),
+            )
             .child(div().flex_1().min_w(px(60.)).child(running_bar("spk-run")))
             .child(
                 button("spk-cancel", Btn::Quiet, None, Some("Cancel"), false)
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_speakers(cx))),
             )
             .into_any_element()
+    }
+
+    fn correct_strip(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        let note = self
+            .correcting
+            .as_ref()
+            .map(|j| format!("{} of {} lines", j.done, j.total))
+            .unwrap_or_default();
+        self.strip(bp)
+            .child(Self::strip_title("Correcting the lines"))
+            .child(
+                mono(div())
+                    .flex_none()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(note),
+            )
+            .child(div().flex_1().min_w(px(60.)).child(running_bar("fix-run")))
+            .child(
+                button("fix-stop", Btn::Quiet, None, Some("Stop"), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_correcting(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn fixes_strip(&self, n: usize, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        self.strip(bp)
+            .child(Self::strip_title("Suggested fixes"))
+            .child(
+                mono(div())
+                    .flex_none()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(if n == 1 {
+                        "1 line".to_string()
+                    } else {
+                        format!("{n} lines")
+                    }),
+            )
+            .child(fill())
+            .child(
+                button("fix-none", Btn::Quiet, None, Some("Dismiss all"), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_fixes(None, cx))),
+            )
+            .child(
+                button(
+                    "fix-all",
+                    Btn::Ghost,
+                    Some(Icon::Check),
+                    Some("Accept all"),
+                    false,
+                )
+                .on_click(cx.listener(|this, _, w, cx| this.accept_fixes(None, w, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// A suggested correction marked against what was heard, with the choice
+    /// to take it or keep the line. `inset` lines it up with an editable cell.
+    fn fix_cell(
+        &self,
+        i: usize,
+        heard: &str,
+        fix: &str,
+        cjk: bool,
+        inset: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let gone = HighlightStyle {
+            color: Some(t::danger_text()),
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(t::danger_text()),
+            }),
+            ..Default::default()
+        };
+        let added = HighlightStyle {
+            color: Some(t::ok()),
+            background_color: Some(gpui::Hsla { a: 0.14, ..t::ok() }),
+            ..Default::default()
+        };
+        let runs = word_diff(heard, fix);
+        let mut text = String::new();
+        let mut marks = Vec::new();
+        for (k, (change, run)) in runs.iter().enumerate() {
+            let start = text.len();
+            text.push_str(run);
+            match change {
+                Change::Same => {}
+                Change::Gone => marks.push((start..text.len(), gone)),
+                Change::Added => marks.push((start..text.len(), added)),
+            }
+            // Struck-out words and their replacement read apart, except in
+            // scripts written without spaces.
+            if !cjk
+                && *change == Change::Gone
+                && runs.get(k + 1).is_some_and(|(c, _)| *c == Change::Added)
+            {
+                text.push(' ');
+            }
+        }
+        col()
+            .gap(px(2.))
+            .when(inset, |d| d.px(px(9.)).py(px(5.)))
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .line_height(relative(1.55))
+                    .text_color(t::text())
+                    .child(StyledText::new(text).with_highlights(marks)),
+            )
+            .child(
+                row()
+                    .gap(px(14.))
+                    .text_size(t::T_SMALL)
+                    .child(link_button(("fix-take", i), "Accept").on_click(cx.listener(
+                        move |this, _, w, cx| {
+                            cx.stop_propagation();
+                            this.accept_fixes(Some(i), w, cx)
+                        },
+                    )))
+                    .child(
+                        link_button(("fix-drop", i), "Dismiss").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.dismiss_fixes(Some(i), cx)
+                            },
+                        )),
+                    ),
+            )
     }
 
     fn failed_strip(&self, p: &Project, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
@@ -699,12 +1170,21 @@ impl Workbench {
                     .text_color(t::danger_text())
                     .child(format!(
                         "{}.",
-                        p.error.clone().unwrap_or_else(|| "This project failed".into()).trim_end_matches('.')
+                        p.error
+                            .clone()
+                            .unwrap_or_else(|| "This project failed".into())
+                            .trim_end_matches('.')
                     )),
             )
             .child(
-                button("ed-failed-del", Btn::DangerGhost, Some(Icon::Trash), Some("Delete"), false)
-                    .on_click(cx.listener(move |this, _, w, cx| this.delete_project(&id, w, cx))),
+                button(
+                    "ed-failed-del",
+                    Btn::DangerGhost,
+                    Some(Icon::Trash),
+                    Some("Delete"),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, w, cx| this.delete_project(&id, w, cx))),
             )
             .into_any_element()
     }
@@ -746,7 +1226,11 @@ fn summary_meta(p: &Project) -> Option<String> {
     if p.summary_long {
         parts.push("a fuller account".into());
     }
-    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
 }
 
 /// Each voice keeps one colour wherever it speaks.

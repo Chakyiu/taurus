@@ -29,11 +29,16 @@ pub fn is_downloaded() -> bool {
 }
 
 pub fn download(progress: impl Fn(f32), cancel: &AtomicBool) -> Result<()> {
-    super::fetch(URL, &model_path(), &mut |done, len| {
-        if len > 0 {
-            progress(done as f32 / len as f32);
-        }
-    }, cancel)
+    super::fetch(
+        URL,
+        &model_path(),
+        &mut |done, len| {
+            if len > 0 {
+                progress(done as f32 / len as f32);
+            }
+        },
+        cancel,
+    )
 }
 
 pub struct SpeakerModel {
@@ -57,7 +62,10 @@ impl SpeakerModel {
             .map_err(|e| fail(&e))?
             .commit_from_file(&path)
             .map_err(|e| fail(&e))?;
-        Ok(Self { session: Mutex::new(session), fbank: Fbank::new() })
+        Ok(Self {
+            session: Mutex::new(session),
+            fbank: Fbank::new(),
+        })
     }
 
     /// A unit-length voice fingerprint for one stretch of 16 kHz audio.
@@ -74,7 +82,8 @@ impl SpeakerModel {
             }
         }
         let mut s = self.session.lock().unwrap();
-        let out = s.run(ort::inputs!["x" => Tensor::from_array(([1usize, frames, N_MELS], feats))?])?;
+        let out =
+            s.run(ort::inputs!["x" => Tensor::from_array(([1usize, frames, N_MELS], feats))?])?;
         let (_, v) = out["embedding"].try_extract_tensor::<f32>()?;
         let mut v = v.to_vec();
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
@@ -140,7 +149,10 @@ pub fn identify(
 /// just before them.
 fn cluster(embs: &[Option<(Vec<f32>, f32)>]) -> Vec<usize> {
     let idx: Vec<usize> = (0..embs.len()).filter(|&i| embs[i].is_some()).collect();
-    let v: Vec<&[f32]> = idx.iter().map(|&i| &embs[i].as_ref().unwrap().0[..]).collect();
+    let v: Vec<&[f32]> = idx
+        .iter()
+        .map(|&i| &embs[i].as_ref().unwrap().0[..])
+        .collect();
     let w: Vec<f32> = idx.iter().map(|&i| embs[i].as_ref().unwrap().1).collect();
     let mut groups = link(&v);
     absorb_small(&mut groups, &v, &w);
@@ -223,8 +235,9 @@ fn centre(g: &[usize], v: &[&[f32]], w: &[f32]) -> Vec<f32> {
 /// average voice each sounds most like.
 fn absorb_small(groups: &mut Vec<Vec<usize>>, v: &[&[f32]], w: &[f32]) {
     let min = MIN_SPEECH_MS.min(MIN_SHARE * w.iter().sum::<f32>());
-    let (big, small): (Vec<_>, Vec<_>) =
-        std::mem::take(groups).into_iter().partition(|g| g.iter().map(|&i| w[i]).sum::<f32>() >= min);
+    let (big, small): (Vec<_>, Vec<_>) = std::mem::take(groups)
+        .into_iter()
+        .partition(|g| g.iter().map(|&i| w[i]).sum::<f32>() >= min);
     if big.is_empty() {
         *groups = small;
         return;
@@ -232,7 +245,8 @@ fn absorb_small(groups: &mut Vec<Vec<usize>>, v: &[&[f32]], w: &[f32]) {
     let centres: Vec<Vec<f32>> = big.iter().map(|g| centre(g, v, w)).collect();
     *groups = big;
     for i in small.into_iter().flatten() {
-        let near = (0..centres.len()).max_by(|&a, &b| dot(v[i], &centres[a]).total_cmp(&dot(v[i], &centres[b])));
+        let near = (0..centres.len())
+            .max_by(|&a, &b| dot(v[i], &centres[a]).total_cmp(&dot(v[i], &centres[b])));
         groups[near.unwrap()].push(i);
     }
 }
@@ -274,7 +288,8 @@ impl Fbank {
     fn new() -> Self {
         let window = (0..FRAME)
             .map(|i| {
-                let hann = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FRAME - 1) as f32).cos();
+                let hann =
+                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FRAME - 1) as f32).cos();
                 hann.powf(0.85)
             })
             .collect();
@@ -283,7 +298,11 @@ impl Fbank {
         let step = (hi - lo) / (N_MELS + 1) as f32;
         let bins = (0..N_MELS)
             .map(|m| {
-                let (l, c, r) = (lo + m as f32 * step, lo + (m + 1) as f32 * step, lo + (m + 2) as f32 * step);
+                let (l, c, r) = (
+                    lo + m as f32 * step,
+                    lo + (m + 1) as f32 * step,
+                    lo + (m + 2) as f32 * step,
+                );
                 let mut first = None;
                 let mut w = Vec::new();
                 for k in 0..NFFT / 2 {
@@ -326,11 +345,22 @@ impl Fbank {
             }
             x[0] -= 0.97 * x[0];
             for (i, c) in buf.iter_mut().enumerate() {
-                *c = Complex::new(if i < FRAME { x[i] * self.window[i] } else { 0.0 }, 0.0);
+                *c = Complex::new(
+                    if i < FRAME {
+                        x[i] * self.window[i]
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                );
             }
             fft.process(&mut buf);
             for (first, w) in &self.bins {
-                let e: f32 = w.iter().enumerate().map(|(j, wj)| wj * buf[first + j].norm_sqr()).sum();
+                let e: f32 = w
+                    .iter()
+                    .enumerate()
+                    .map(|(j, wj)| wj * buf[first + j].norm_sqr())
+                    .sum();
                 out.push(e.max(f32::EPSILON).ln());
             }
         }
@@ -359,13 +389,27 @@ mod tests {
 
     #[test]
     fn groups_alike_voices_in_order_of_appearance() {
-        let embs = vec![v(&[1.0, 0.1]), v(&[0.1, 1.0]), None, v(&[0.9, 0.2]), v(&[0.2, 0.9])];
+        let embs = vec![
+            v(&[1.0, 0.1]),
+            v(&[0.1, 1.0]),
+            None,
+            v(&[0.9, 0.2]),
+            v(&[0.2, 0.9]),
+        ];
         assert_eq!(cluster(&embs), vec![0, 1, 1, 0, 1]);
     }
 
     #[test]
     fn a_stray_line_joins_the_closest_voice() {
-        let mut embs: Vec<_> = (0..40).map(|i| v(if i % 2 == 0 { &[1.0, 0.0, 0.0] } else { &[0.0, 1.0, 0.0] })).collect();
+        let mut embs: Vec<_> = (0..40)
+            .map(|i| {
+                v(if i % 2 == 0 {
+                    &[1.0, 0.0, 0.0]
+                } else {
+                    &[0.0, 1.0, 0.0]
+                })
+            })
+            .collect();
         // Less than SAME_SPEAKER alike to either voice, but nearer the first.
         embs.insert(7, v(&[0.45, 0.1, 0.88]));
         let labels = cluster(&embs);
@@ -378,7 +422,9 @@ mod tests {
         // Two takes of one voice and another voice. Lines of the two takes are
         // 0.47 alike, their averages 0.75.
         let voices: [&[f32]; 3] = [&[1.0, 0.0, 0.0], &[0.8, 0.6, 0.0], &[0.0, 0.0, 1.0]];
-        let embs: Vec<_> = (0..30).map(|i| noisy(voices[i % 3], 3 + i, 0.7f32.sqrt())).collect();
+        let embs: Vec<_> = (0..30)
+            .map(|i| noisy(voices[i % 3], 3 + i, 0.7f32.sqrt()))
+            .collect();
         let labels = cluster(&embs);
         assert_eq!(labels.iter().max(), Some(&1));
         assert!((0..30).all(|i| (labels[i] == labels[0]) == (i % 3 != 2)));

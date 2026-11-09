@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, Corner, Div, Entity, ExternalPaths, Focusable,
-     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement,
-    Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, anchored,
-    deferred, div, img, px, relative,
+    Animation, AnimationExt as _, AnyElement, Context, Corner, Div, Entity, ExternalPaths,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Render, SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, img,
+    px, relative,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -53,8 +53,14 @@ impl Workbench {
         let update = self.update_button(bp, cx);
         let drag = || div().window_control_area(gpui::WindowControlArea::Drag);
         let back = || {
-            button("top-back", Btn::Quiet, Some(Icon::Back), Some("Projects"), false)
-                .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)))
+            button(
+                "top-back",
+                Btn::Quiet,
+                Some(Icon::Back),
+                Some("Projects"),
+                false,
+            )
+            .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)))
         };
         let mut left = row().gap(px(6.)).min_w_0();
         let mut right = row().flex_none().gap(px(6.)).children(update);
@@ -77,19 +83,33 @@ impl Workbench {
                             (!bp.mobile()).then_some("Glossary"),
                             false,
                         )
-                        .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Glossary, w, cx))),
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.show_view(View::Glossary, w, cx)),
+                        ),
                     )
                     .child(
-                        button("top-about", Btn::Quiet, Some(Icon::Info), (!bp.mobile()).then_some("About"), false)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_about(cx))),
+                        button(
+                            "top-about",
+                            Btn::Quiet,
+                            Some(Icon::Info),
+                            (!bp.mobile()).then_some("About"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_about(cx))),
                     )
                     .child(self.new_button(cx));
             }
             View::Glossary => {
                 left = left.child(back()).child(self.crumb("Glossary"));
                 right = right.child(
-                    button("gl-add", Btn::Primary, Some(Icon::Plus), Some("Add term"), false)
-                        .on_click(cx.listener(|this, _, w, cx| this.open_term_dialog(None, w, cx))),
+                    button(
+                        "gl-add",
+                        Btn::Primary,
+                        Some(Icon::Plus),
+                        Some("Add term"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, w, cx| this.open_term_dialog(None, w, cx))),
                 );
             }
             View::Editor => {
@@ -129,10 +149,16 @@ impl Workbench {
                         });
                     let can = !p.segs.is_empty();
                     right = right.child(
-                        button("top-export", Btn::Ghost, Some(Icon::Download), Some("Export"), !can)
-                            .when(can, |d| {
-                                d.on_click(cx.listener(|this, _, _, cx| this.open_export(cx)))
-                            }),
+                        button(
+                            "top-export",
+                            Btn::Ghost,
+                            Some(Icon::Download),
+                            Some("Export"),
+                            !can,
+                        )
+                        .when(can, |d| {
+                            d.on_click(cx.listener(|this, _, _, cx| this.open_export(cx)))
+                        }),
                     );
                 }
             }
@@ -166,7 +192,10 @@ impl Workbench {
             Status::Live if paused => ("Paused".into(), t::warn_text()),
             Status::Live => ("Recording".into(), t::accent()),
             Status::Working if p.segs.is_empty() => ("Extracting".into(), t::accent()),
-            Status::Working => (format!("Translating · {}%", p.translated_pct()), t::accent()),
+            Status::Working => (
+                format!("Translating · {}%", p.translated_pct()),
+                t::accent(),
+            ),
             Status::Failed => ("Failed".into(), t::danger_text()),
             Status::Review => {
                 let open = project_stats(&self.glossary, p).flagged;
@@ -192,7 +221,8 @@ impl Workbench {
                 (false, _) => (t::warn(), "Set up engines".into()),
             },
         };
-        status_button("top-engines", dot, text, bp).on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx)))
+        status_button("top-engines", dot, text, bp)
+            .on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx)))
     }
 
     /// Shown once a newer Taurus is installed, or found but not installed.
@@ -202,20 +232,28 @@ impl Workbench {
             UpdateState::Available { .. } => ("Update available", false),
             _ => return None,
         };
-        Some(status_button("top-update", t::accent(), text.into(), bp).on_click(cx.listener(
-            move |this, _, _, cx| {
-                if restart {
-                    this.restart_to_update(cx)
-                } else {
-                    this.open_about(cx)
-                }
-            },
-        )))
+        Some(
+            status_button("top-update", t::accent(), text.into(), bp).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    if restart {
+                        this.restart_to_update(cx)
+                    } else {
+                        this.open_about(cx)
+                    }
+                },
+            )),
+        )
     }
 
     fn new_button(&self, cx: &mut Context<Self>) -> Div {
-        let trigger = button("top-new", Btn::Primary, Some(Icon::Plus), Some("New"), false)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_new_menu(cx)));
+        let trigger = button(
+            "top-new",
+            Btn::Primary,
+            Some(Icon::Plus),
+            Some("New"),
+            false,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_new_menu(cx)));
         let mut wrap = div().flex_none().child(trigger);
         if !self.new_menu {
             return wrap;
@@ -235,7 +273,12 @@ impl Workbench {
                     col()
                         .min_w_0()
                         .child(div().text_size(t::T_CONTROL).child(title))
-                        .child(div().text_size(t::T_SMALL).text_color(t::text_2()).child(sub)),
+                        .child(
+                            div()
+                                .text_size(t::T_SMALL)
+                                .text_color(t::text_2())
+                                .child(sub),
+                        ),
                 )
         };
         let menu = col()
@@ -260,22 +303,37 @@ impl Workbench {
                 cx.notify();
             }))
             .child(
-                item("new-live", Icon::Waveform, "Live caption", "Listen to this Mac or a microphone")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_capture(cx))),
+                item(
+                    "new-live",
+                    Icon::Waveform,
+                    "Live caption",
+                    "Listen to this Mac or a microphone",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_capture(cx))),
             )
             .child(
-                item("new-video", Icon::Film, "From a video", "Use its subtitle track or its audio")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.new_menu = false;
-                        this.browse_video(cx)
-                    })),
+                item(
+                    "new-video",
+                    Icon::Film,
+                    "From a video",
+                    "Use its subtitle track or its audio",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.new_menu = false;
+                    this.browse_video(cx)
+                })),
             )
             .child(
-                item("new-import", Icon::Upload, "Import subtitles", "SRT, VTT or ASS")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.new_menu = false;
-                        this.browse_subtitles(cx)
-                    })),
+                item(
+                    "new-import",
+                    Icon::Upload,
+                    "Import subtitles",
+                    "SRT, VTT or ASS",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.new_menu = false;
+                    this.browse_subtitles(cx)
+                })),
             );
         wrap = wrap.child(
             deferred(
@@ -473,7 +531,7 @@ impl Workbench {
             Dialog::Term { .. } => 520.,
             Dialog::Capture | Dialog::Extract | Dialog::Export => 480.,
             Dialog::Confirm { .. } | Dialog::Rename { .. } | Dialog::Translate => 400.,
-            Dialog::Summarize { .. } | Dialog::About => 440.,
+            Dialog::Summarize { .. } | Dialog::About | Dialog::Correct => 440.,
         };
         let max_w = px(f32::min(width, bp.w - 32.));
         let mut extra: Option<AnyElement> = None;
@@ -482,7 +540,11 @@ impl Workbench {
             button("dlg-x", Btn::Icon, Some(Icon::X), None, false)
                 .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx)))
         };
-        let cancel_label = if matches!(dialog, Dialog::About) { "Close" } else { "Cancel" };
+        let cancel_label = if matches!(dialog, Dialog::About) {
+            "Close"
+        } else {
+            "Cancel"
+        };
         let cancel = |cx: &mut Context<Self>| {
             button("dlg-cancel", Btn::Ghost, None, Some(cancel_label), false)
                 .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx)))
@@ -522,7 +584,9 @@ impl Workbench {
                 button("dlg-ok", Btn::Danger, None, Some(ok_label), false)
                     .on_click(cx.listener(|this, _, window, cx| this.confirm_dialog(window, cx))),
             ),
-            Dialog::Rename { speaker, note, err, .. } => (
+            Dialog::Rename {
+                speaker, note, err, ..
+            } => (
                 row()
                     .gap(px(10.))
                     .child(title_el(match speaker {
@@ -532,7 +596,11 @@ impl Workbench {
                     .child(close_btn(cx)),
                 div()
                     .child(form_field(
-                        req_label(if speaker.is_some() { "Name" } else { "Project name" }),
+                        req_label(if speaker.is_some() {
+                            "Name"
+                        } else {
+                            "Project name"
+                        }),
                         self.text_field(&self.rename_input, None, err.is_some(), window, cx)
                             .into_any_element(),
                         err.iter()
@@ -550,7 +618,10 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, window, cx| this.rename_project(window, cx))),
             ),
             Dialog::Translate => {
-                let from = self.current().map(|p| lang_name(&p.from)).unwrap_or_default();
+                let from = self
+                    .current()
+                    .map(|p| lang_name(&p.from))
+                    .unwrap_or_default();
                 (
                     row()
                         .gap(px(10.))
@@ -590,7 +661,12 @@ impl Workbench {
                 lookup_error,
                 ..
             } => {
-                let endpoint = self.settings.mt_url.trim().trim_end_matches('/').to_string();
+                let endpoint = self
+                    .settings
+                    .mt_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
                 let ready = self.settings.mt_ready();
                 let named = !self.sum_model.read(cx).value().trim().is_empty();
                 let blocked = !ready || (*custom && !named);
@@ -684,8 +760,9 @@ impl Workbench {
                 self.extract_body(bp, cx),
                 {
                     let can = self.extract.track.is_some();
-                    button("dlg-ok", Btn::Primary, None, Some("Start"), !can)
-                        .when(can, |d| d.on_click(cx.listener(|this, _, _, cx| this.extract_run(cx))))
+                    button("dlg-ok", Btn::Primary, None, Some("Start"), !can).when(can, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.extract_run(cx)))
+                    })
                 },
             ),
             Dialog::Export => {
@@ -693,7 +770,9 @@ impl Workbench {
                 let can = built.as_ref().is_some_and(|b| b.count > 0);
                 extra = Some(
                     button("exp-copy", Btn::Ghost, Some(Icon::Copy), Some("Copy"), !can)
-                        .when(can, |d| d.on_click(cx.listener(|this, _, _, cx| this.copy_export(cx))))
+                        .when(can, |d| {
+                            d.on_click(cx.listener(|this, _, _, cx| this.copy_export(cx)))
+                        })
                         .into_any_element(),
                 );
                 (
@@ -702,8 +781,16 @@ impl Workbench {
                         .child(title_el("Export".into()))
                         .child(close_btn(cx)),
                     self.export_body(built.as_ref(), cx),
-                    button("dlg-ok", Btn::Primary, Some(Icon::Download), Some("Save file…"), !can)
-                        .when(can, |d| d.on_click(cx.listener(|this, _, _, cx| this.save_export(cx)))),
+                    button(
+                        "dlg-ok",
+                        Btn::Primary,
+                        Some(Icon::Download),
+                        Some("Save file…"),
+                        !can,
+                    )
+                    .when(can, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.save_export(cx)))
+                    }),
                 )
             }
             Dialog::Engines { .. } => (
@@ -723,6 +810,61 @@ impl Workbench {
                 self.about_body(cx),
                 self.update_action(cx),
             ),
+            Dialog::Correct => {
+                let ready = self.settings.mt_ready();
+                let (lang, translated) = self
+                    .current()
+                    .map(|p| (lang_name(&p.from), p.translate))
+                    .unwrap_or_default();
+                let endpoint = self
+                    .settings
+                    .mt_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                let model = self.settings.mt_model.trim().to_string();
+                (
+                    row()
+                        .gap(px(10.))
+                        .child(title_el("Correct the lines".into()))
+                        .child(close_btn(cx)),
+                    col()
+                        .gap(px(16.))
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .text_color(t::text_2())
+                                .line_height(relative(1.6))
+                                .child(format!(
+                                    "Reads the {lang} lines in order and suggests fixes for words the speech engine misheard. Nothing changes until you accept a fix{}.",
+                                    if translated { ", and the lines you accept are translated again" } else { "" }
+                                )),
+                        )
+                        .child(field(
+                            "What is it about? (optional)",
+                            self.text_field(&self.correct_about, None, false, window, cx),
+                        ))
+                        .child(hint(
+                            "The topic and the names that come up help the most. Glossary terms count as correct spellings.",
+                        ))
+                        .child(hint(format!("Sent to {endpoint} with {model}. Both are set in Engines.")))
+                        .when(!ready, |d| {
+                            d.child(
+                                row()
+                                    .flex_wrap()
+                                    .text_size(t::T_SMALL)
+                                    .text_color(t::warn_text())
+                                    .child("The endpoint is not set up yet.\u{00A0}")
+                                    .child(
+                                        link_button("fix-engines", "Set up engines")
+                                            .on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx))),
+                                    ),
+                            )
+                        }),
+                    button("dlg-ok", Btn::Primary, Some(Icon::Wand), Some("Correct"), !ready)
+                        .when(ready, |d| d.on_click(cx.listener(|this, _, w, cx| this.correct_now(w, cx)))),
+                )
+            }
             Dialog::Term {
                 editing,
                 rule,
@@ -934,23 +1076,39 @@ impl Workbench {
     fn update_status(&self) -> (String, gpui::Hsla) {
         match &self.update {
             UpdateState::Idle => match self.settings.update_checked {
-                0 => ("Taurus has not looked for a new version yet.".into(), t::text_2()),
+                0 => (
+                    "Taurus has not looked for a new version yet.".into(),
+                    t::text_2(),
+                ),
                 at => {
                     let when = when_label(at * 1000);
-                    let when = if ["Just now", "Today", "Yesterday"].iter().any(|w| when.starts_with(w)) {
+                    let when = if ["Just now", "Today", "Yesterday"]
+                        .iter()
+                        .any(|w| when.starts_with(w))
+                    {
                         when.to_lowercase()
                     } else {
                         when
                     };
-                    (format!("Last looked for a new version {when}."), t::text_2())
+                    (
+                        format!("Last looked for a new version {when}."),
+                        t::text_2(),
+                    )
                 }
             },
             UpdateState::Checking => ("Looking for a new version…".into(), t::text_2()),
             UpdateState::UpToDate => ("Taurus is up to date.".into(), t::text_2()),
-            UpdateState::Available { release, can_install: true } => {
-                (format!("Taurus {} is available.", release.version), t::accent_text())
-            }
-            UpdateState::Available { release, can_install: false } => {
+            UpdateState::Available {
+                release,
+                can_install: true,
+            } => (
+                format!("Taurus {} is available.", release.version),
+                t::accent_text(),
+            ),
+            UpdateState::Available {
+                release,
+                can_install: false,
+            } => {
                 let why = if !release.installable() {
                     "Download it from GitHub."
                 } else if self.app_bundle.is_none() {
@@ -958,17 +1116,27 @@ impl Workbench {
                 } else {
                     "Taurus cannot replace itself where it is now. Move it to the Applications folder, or download this version from GitHub."
                 };
-                (format!("Taurus {} is available. {why}", release.version), t::warn_text())
+                (
+                    format!("Taurus {} is available. {why}", release.version),
+                    t::warn_text(),
+                )
             }
-            UpdateState::Installing { release, pct, .. } => {
-                (format!("Downloading Taurus {}… {:.0}%", release.version, pct * 100.0), t::text_2())
-            }
-            UpdateState::Ready(version) => {
-                (format!("Taurus {version} is installed. Restart to start using it."), t::accent_text())
-            }
-            UpdateState::Failed(e) => {
-                (format!("Could not update: {}.", e.trim_end_matches('.')), t::danger_text())
-            }
+            UpdateState::Installing { release, pct, .. } => (
+                format!(
+                    "Downloading Taurus {}… {:.0}%",
+                    release.version,
+                    pct * 100.0
+                ),
+                t::text_2(),
+            ),
+            UpdateState::Ready(version) => (
+                format!("Taurus {version} is installed. Restart to start using it."),
+                t::accent_text(),
+            ),
+            UpdateState::Failed(e) => (
+                format!("Could not update: {}.", e.trim_end_matches('.')),
+                t::danger_text(),
+            ),
         }
     }
 
@@ -978,20 +1146,43 @@ impl Workbench {
         match &self.update {
             UpdateState::Checking => busy("Checking…"),
             UpdateState::Installing { .. } => busy("Installing…"),
-            UpdateState::Available { release, can_install: true } => {
-                button("dlg-ok", Btn::Primary, Some(Icon::Download), Some(&format!("Install {}", release.version)), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.install_update(cx)))
-            }
-            UpdateState::Available { can_install: false, .. } => {
-                button("dlg-ok", Btn::Primary, Some(Icon::Download), Some("Download"), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_release_page(cx)))
-            }
-            UpdateState::Ready(_) => button("dlg-ok", Btn::Primary, Some(Icon::Refresh), Some("Restart to update"), false)
-                .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx))),
-            UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_) => {
-                button("dlg-ok", Btn::Primary, Some(Icon::Refresh), Some("Check for updates"), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.check_for_update(cx)))
-            }
+            UpdateState::Available {
+                release,
+                can_install: true,
+            } => button(
+                "dlg-ok",
+                Btn::Primary,
+                Some(Icon::Download),
+                Some(&format!("Install {}", release.version)),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.install_update(cx))),
+            UpdateState::Available {
+                can_install: false, ..
+            } => button(
+                "dlg-ok",
+                Btn::Primary,
+                Some(Icon::Download),
+                Some("Download"),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.open_release_page(cx))),
+            UpdateState::Ready(_) => button(
+                "dlg-ok",
+                Btn::Primary,
+                Some(Icon::Refresh),
+                Some("Restart to update"),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx))),
+            UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_) => button(
+                "dlg-ok",
+                Btn::Primary,
+                Some(Icon::Refresh),
+                Some("Check for updates"),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.check_for_update(cx))),
         }
     }
 
@@ -1043,14 +1234,19 @@ impl Workbench {
                 .gap(px(12.))
                 .items_center()
                 .child(
-                    button(id, Btn::Ghost, None, Some("Test"), busy)
-                        .when(!busy, |d| d.on_click(cx.listener(move |this, _, _, cx| on(this, cx)))),
+                    button(id, Btn::Ghost, None, Some("Test"), busy).when(!busy, |d| {
+                        d.on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
+                    }),
                 )
                 .child(div().flex_1().min_w_0().children(msg))
         };
 
         let choice = *asr;
-        let option = |id: &'static str, value: AsrChoice, title: &'static str, sub: &'static str, cx: &mut Context<Self>| {
+        let option = |id: &'static str,
+                      value: AsrChoice,
+                      title: &'static str,
+                      sub: &'static str,
+                      cx: &mut Context<Self>| {
             radio_row(id, choice == value, title, radio_sub(sub))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_engine_asr(value, cx)))
         };
@@ -1080,20 +1276,44 @@ impl Workbench {
             ));
 
         if choice == AsrChoice::Whisper {
-            let models = col().gap(px(6.)).children(crate::engine::WHISPER_MODELS.iter().map(|m| {
-                let id = m.id;
-                self.model_row(id.to_string(), m.id, *whisper_model == m.id, m.size, m.note, m.is_downloaded(), cx)
+            let models = col()
+                .gap(px(6.))
+                .children(crate::engine::WHISPER_MODELS.iter().map(|m| {
+                    let id = m.id;
+                    self.model_row(
+                        id.to_string(),
+                        m.id,
+                        *whisper_model == m.id,
+                        m.size,
+                        m.note,
+                        m.is_downloaded(),
+                        cx,
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.set_whisper_model(id, cx)))
-            }));
-            speech = speech.child(div().mt(px(8.)).child(label("Model"))).child(models);
+                }));
+            speech = speech
+                .child(div().mt(px(8.)).child(label("Model")))
+                .child(models);
         }
         if choice == AsrChoice::QwenLocal {
-            let models = col().gap(px(6.)).children(crate::engine::QWEN_MODELS.iter().map(|m| {
-                let id = m.id;
-                self.model_row(m.download_id(), m.label, *qwen_local_model == m.id, m.size, m.note, m.is_downloaded(), cx)
+            let models = col()
+                .gap(px(6.))
+                .children(crate::engine::QWEN_MODELS.iter().map(|m| {
+                    let id = m.id;
+                    self.model_row(
+                        m.download_id(),
+                        m.label,
+                        *qwen_local_model == m.id,
+                        m.size,
+                        m.note,
+                        m.is_downloaded(),
+                        cx,
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.set_qwen_model(id, cx)))
-            }));
-            speech = speech.child(div().mt(px(8.)).child(label("Model"))).child(models);
+                }));
+            speech = speech
+                .child(div().mt(px(8.)).child(label("Model")))
+                .child(models);
         }
 
         let mut body = col().child(section("Speech recognition")).child(speech);
@@ -1140,15 +1360,27 @@ impl Workbench {
         let action = match (have, dl.is_some()) {
             (_, true) => {
                 let id = dl_id.clone();
-                button(SharedString::from(format!("dl-x-{dl_id}")), Btn::Ghost, None, Some("Cancel"), false)
-                    .on_click(cx.listener(move |this, _, _, cx| this.cancel_download(&id, cx)))
-                    .into_any_element()
+                button(
+                    SharedString::from(format!("dl-x-{dl_id}")),
+                    Btn::Ghost,
+                    None,
+                    Some("Cancel"),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.cancel_download(&id, cx)))
+                .into_any_element()
             }
             (false, false) => {
                 let id = dl_id.clone();
-                button(SharedString::from(format!("dl-{dl_id}")), Btn::Ghost, Some(Icon::Download), Some("Download"), false)
-                    .on_click(cx.listener(move |this, _, _, cx| this.download_model(&id, cx)))
-                    .into_any_element()
+                button(
+                    SharedString::from(format!("dl-{dl_id}")),
+                    Btn::Ghost,
+                    Some(Icon::Download),
+                    Some("Download"),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.download_model(&id, cx)))
+                .into_any_element()
             }
             (true, false) => div().into_any_element(),
         };
@@ -1168,7 +1400,14 @@ impl Workbench {
                 .flex_1()
                 .min_w_0(),
             )
-            .child(div().w(px(112.)).flex_none().flex().justify_end().child(action))
+            .child(
+                div()
+                    .w(px(112.))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(action),
+            )
     }
 
     // ─── toasts ────────────────────────────────────────────

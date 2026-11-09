@@ -5,9 +5,9 @@
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -23,7 +23,11 @@ pub enum LiveEvent {
     Ready,
     Level(f32),
     Partial(String),
-    Final { start_ms: i64, end_ms: i64, text: String },
+    Final {
+        start_ms: i64,
+        end_ms: i64,
+        text: String,
+    },
     Error(String),
     /// Everything heard before Stop has been committed.
     Stopped,
@@ -85,7 +89,13 @@ pub fn start(
         }
     };
     let video = match video {
-        Some(v) => match capture::record_screen(&v.target, v.quality, v.system_audio, v.microphone, &v.path) {
+        Some(v) => match capture::record_screen(
+            &v.target,
+            v.quality,
+            v.system_audio,
+            v.microphone,
+            &v.path,
+        ) {
             Ok(r) => Some(r),
             Err(e) => {
                 drop(capture);
@@ -151,7 +161,13 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(engine: Engine, lang: String, offset_ms: i64, tx: Sender<LiveEvent>, recording: Recording) -> Self {
+    fn new(
+        engine: Engine,
+        lang: String,
+        offset_ms: i64,
+        tx: Sender<LiveEvent>,
+        recording: Recording,
+    ) -> Self {
         Self {
             engine,
             lang,
@@ -185,7 +201,9 @@ impl Worker {
                 Ok(b) => b,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => {
-                    let _ = self.tx.send(LiveEvent::Error("the audio source stopped".into()));
+                    let _ = self
+                        .tx
+                        .send(LiveEvent::Error("the audio source stopped".into()));
                     self.commit();
                     let _ = self.tx.send(LiveEvent::Stopped);
                     return;
@@ -245,7 +263,11 @@ impl Worker {
             self.level_acc.clear();
         }
         // The noise floor follows quiet stretches quickly and loud ones slowly.
-        self.noise = if e < self.noise { self.noise * 0.9 + e * 0.1 } else { self.noise * 0.999 + e * 0.001 };
+        self.noise = if e < self.noise {
+            self.noise * 0.9 + e * 0.1
+        } else {
+            self.noise * 0.999 + e * 0.001
+        };
         let speech = e > (self.noise * 3.0).max(0.006);
         self.heard += f.len();
         if self.pending.is_empty() && !speech {
@@ -288,7 +310,11 @@ impl Worker {
         match self.engine.transcribe(&pcm, &self.lang, true, None) {
             Ok(segs) => {
                 let sep = if is_cjk(&self.lang) { "" } else { " " };
-                let text = segs.iter().map(|s| s.text.trim()).collect::<Vec<_>>().join(sep);
+                let text = segs
+                    .iter()
+                    .map(|s| s.text.trim())
+                    .collect::<Vec<_>>()
+                    .join(sep);
                 let _ = self.tx.send(LiveEvent::Partial(text));
                 self.errors = 0;
             }
@@ -377,7 +403,8 @@ impl Recording {
 
     fn push(&mut self, pcm: &[f32]) -> std::io::Result<()> {
         for s in pcm {
-            self.out.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
+            self.out
+                .write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
         }
         self.samples += pcm.len() as u64;
         self.unpatched += pcm.len();
@@ -423,7 +450,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let data = (SAMPLE_RATE * 4 + 160) * 2;
         assert_eq!(bytes.len(), 44 + data);
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize, data);
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, 36 + data);
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize,
+            data
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+            36 + data
+        );
     }
 }

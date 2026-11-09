@@ -50,22 +50,32 @@ impl Workbench {
             );
         }
 
-        let tracks = col().gap(px(6.)).children(ex.tracks().into_iter().enumerate().map(|(ix, r)| {
-            let row = radio_row(
-                SharedString::from(format!("track-{ix}")),
-                r.key.is_some() && ex.track == r.key,
-                &r.title,
-                mono(div()).text_size(t::T_SMALL).text_color(t::text_2()).child(r.sub),
-            );
-            match r.key {
-                Some(key) => row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_track(key);
-                    cx.notify();
-                })),
-                None => row.opacity(0.55).cursor_default(),
-            }
-        }));
-        body = body.child(field("Use", tracks)).child(self.lang_pair(Sel::ExFrom, Sel::ExTo, false, cx));
+        let tracks = col()
+            .gap(px(6.))
+            .children(ex.tracks().into_iter().enumerate().map(|(ix, r)| {
+                let row = radio_row(
+                    SharedString::from(format!("track-{ix}")),
+                    r.key.is_some() && ex.track == r.key,
+                    &r.title,
+                    mono(div())
+                        .text_size(t::T_SMALL)
+                        .text_color(t::text_2())
+                        .child(r.sub),
+                );
+                match r.key {
+                    Some(key) => row.on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_track(key);
+                        cx.notify();
+                    })),
+                    None => row.opacity(0.55).cursor_default(),
+                }
+            }));
+        body = body.child(field("Use", tracks)).child(self.lang_pair(
+            Sel::ExFrom,
+            Sel::ExTo,
+            false,
+            cx,
+        ));
         body
     }
 
@@ -93,7 +103,11 @@ impl Workbench {
                     .flex_none()
                     .text_size(t::T_SMALL)
                     .text_color(t::text_2())
-                    .child(format!("step {} of {}", (step + 1).min(ex.stages.len()), ex.stages.len())),
+                    .child(format!(
+                        "step {} of {}",
+                        (step + 1).min(ex.stages.len()),
+                        ex.stages.len()
+                    )),
             )
             .child(
                 div()

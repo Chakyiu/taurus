@@ -10,7 +10,6 @@ pub mod speaker;
 
 pub use qwen::{QWEN_MODELS, QwenModel};
 
-
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,9 +114,15 @@ impl Settings {
 
     pub fn asr_ready(&self) -> bool {
         match self.asr {
-            AsrChoice::Whisper => WhisperModel::find(&self.whisper_model).is_some_and(|m| m.is_downloaded()),
-            AsrChoice::QwenLocal => QwenModel::find(&self.qwen_local_model).is_some_and(|m| m.is_downloaded()),
-            AsrChoice::Qwen => !self.qwen_url.trim().is_empty() && !self.qwen_model.trim().is_empty(),
+            AsrChoice::Whisper => {
+                WhisperModel::find(&self.whisper_model).is_some_and(|m| m.is_downloaded())
+            }
+            AsrChoice::QwenLocal => {
+                QwenModel::find(&self.qwen_local_model).is_some_and(|m| m.is_downloaded())
+            }
+            AsrChoice::Qwen => {
+                !self.qwen_url.trim().is_empty() && !self.qwen_model.trim().is_empty()
+            }
         }
     }
 
@@ -139,10 +144,16 @@ impl Settings {
 /// ONNX Runtime allows one environment per process, ever, so every model
 /// shares this one.
 pub fn ort_env() -> Result<ort::environment::Environment> {
-    static ENV: std::sync::Mutex<Option<ort::environment::Environment>> = std::sync::Mutex::new(None);
+    static ENV: std::sync::Mutex<Option<ort::environment::Environment>> =
+        std::sync::Mutex::new(None);
     let mut env = ENV.lock().unwrap();
     if env.is_none() {
-        *env = Some(ort::init().with_name("taurus").build().map_err(|e| anyhow::anyhow!("ONNX Runtime: {e}"))?);
+        *env = Some(
+            ort::init()
+                .with_name("taurus")
+                .build()
+                .map_err(|e| anyhow::anyhow!("ONNX Runtime: {e}"))?,
+        );
     }
     Ok(env.clone().unwrap())
 }
@@ -170,9 +181,24 @@ pub struct WhisperModel {
 }
 
 pub const WHISPER_MODELS: &[WhisperModel] = &[
-    WhisperModel { id: "tiny", file: "ggml-tiny.bin", size: "75 MB", note: "fastest, rough" },
-    WhisperModel { id: "base", file: "ggml-base.bin", size: "142 MB", note: "fast, good for live" },
-    WhisperModel { id: "small", file: "ggml-small.bin", size: "466 MB", note: "balanced" },
+    WhisperModel {
+        id: "tiny",
+        file: "ggml-tiny.bin",
+        size: "75 MB",
+        note: "fastest, rough",
+    },
+    WhisperModel {
+        id: "base",
+        file: "ggml-base.bin",
+        size: "142 MB",
+        note: "fast, good for live",
+    },
+    WhisperModel {
+        id: "small",
+        file: "ggml-small.bin",
+        size: "466 MB",
+        note: "balanced",
+    },
     WhisperModel {
         id: "large-v3-turbo-q5",
         file: "ggml-large-v3-turbo-q5_0.bin",
@@ -201,17 +227,25 @@ impl WhisperModel {
     }
 
     fn url(&self) -> String {
-        format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}", self.file)
+        format!(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+            self.file
+        )
     }
 
     pub fn download(&self, progress: impl Fn(f32), cancel: &AtomicBool) -> Result<()> {
         let mut total = 0;
-        fetch(&self.url(), &self.path(), &mut |done, len| {
-            total = len;
-            if total > 0 {
-                progress(done as f32 / total as f32);
-            }
-        }, cancel)
+        fetch(
+            &self.url(),
+            &self.path(),
+            &mut |done, len| {
+                total = len;
+                if total > 0 {
+                    progress(done as f32 / total as f32);
+                }
+            },
+            cancel,
+        )
     }
 }
 
@@ -228,7 +262,10 @@ pub(crate) fn fetch(
         .timeout_connect(Some(Duration::from_secs(20)))
         .build()
         .into();
-    let mut resp = agent.get(url).call().with_context(|| format!("contacting {}", url.split('/').nth(2).unwrap_or(url)))?;
+    let mut resp = agent
+        .get(url)
+        .call()
+        .with_context(|| format!("contacting {}", url.split('/').nth(2).unwrap_or(url)))?;
     let total = resp
         .headers()
         .get("content-length")
@@ -288,7 +325,9 @@ pub(crate) fn untimed_agent() -> ureq::Agent {
 }
 
 /// Turns a non-2xx response into an error carrying the server's own message.
-pub(crate) fn check(mut resp: ureq::http::Response<ureq::Body>) -> Result<ureq::http::Response<ureq::Body>> {
+pub(crate) fn check(
+    mut resp: ureq::http::Response<ureq::Body>,
+) -> Result<ureq::http::Response<ureq::Body>> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
@@ -309,7 +348,10 @@ pub(crate) fn check(mut resp: ureq::http::Response<ureq::Body>) -> Result<ureq::
 
 pub(crate) fn friendly(e: &anyhow::Error, url: &str) -> String {
     let text = format!("{e:#}");
-    if text.contains("Connection refused") || text.contains("ConnectionFailed") || text.contains("connect") {
+    if text.contains("Connection refused")
+        || text.contains("ConnectionFailed")
+        || text.contains("connect")
+    {
         format!("nothing is answering at {url}")
     } else {
         text

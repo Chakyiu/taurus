@@ -48,19 +48,28 @@ impl Workbench {
             .iter()
             .filter(|p| {
                 q.is_empty()
-                    || format!("{} {} {} {}", p.name, p.source, lang_name(p.out_lang()), p.summary)
-                        .to_lowercase()
-                        .contains(&q)
+                    || format!(
+                        "{} {} {} {}",
+                        p.name,
+                        p.source,
+                        lang_name(p.out_lang()),
+                        p.summary
+                    )
+                    .to_lowercase()
+                    .contains(&q)
             })
             .map(|p| self.project_row(p, bp, cx))
             .collect();
         let none_match = rows.is_empty();
 
         let search = (self.projects.len() >= SEARCH_FROM).then(|| {
-            div()
-                .w(px(260.))
-                .mb(px(8.))
-                .child(self.text_field(&self.pj_search, Some(Icon::Search), false, window, cx))
+            div().w(px(260.)).mb(px(8.)).child(self.text_field(
+                &self.pj_search,
+                Some(Icon::Search),
+                false,
+                window,
+                cx,
+            ))
         });
 
         let list = div()
@@ -84,7 +93,11 @@ impl Workbench {
                     }),
             );
         screen()
-            .child(with_scroll_bar("pj-frame", list, &self.projects_scroll).flex_1().min_h_0())
+            .child(
+                with_scroll_bar("pj-frame", list, &self.projects_scroll)
+                    .flex_1()
+                    .min_h_0(),
+            )
             .into_any_element()
     }
 
@@ -122,7 +135,9 @@ impl Workbench {
             None,
             false,
         )
-        .when(!bp.mobile(), |d| d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
+        .when(!bp.mobile(), |d| {
+            d.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+        })
         .on_click(cx.listener(move |this, _, w, cx| {
             cx.stop_propagation();
             this.delete_project(&del_id, w, cx)
@@ -155,7 +170,11 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(t::T_SMALL)
-                            .text_color(if failed { t::danger_text() } else { t::text_2() })
+                            .text_color(if failed {
+                                t::danger_text()
+                            } else {
+                                t::text_2()
+                            })
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
@@ -170,7 +189,11 @@ impl Workbench {
                     .text_color(color)
                     .whitespace_nowrap()
                     .when(recording, |d| {
-                        d.child(pulse_dot(SharedString::from(format!("rec-{pid}")), t::accent(), 7.))
+                        d.child(pulse_dot(
+                            SharedString::from(format!("rec-{pid}")),
+                            t::accent(),
+                            7.,
+                        ))
                     })
                     .child(status),
             )

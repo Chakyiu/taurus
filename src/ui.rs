@@ -158,7 +158,9 @@ pub fn button(
         .font_weight(weight(fw))
         .whitespace_nowrap()
         .when(icon_only, |d| d.w(px(36.)))
-        .when(!icon_only, |d| d.px(px(if kind == Btn::Quiet { 10. } else { 14. })));
+        .when(!icon_only, |d| {
+            d.px(px(if kind == Btn::Quiet { 10. } else { 14. }))
+        });
 
     if disabled {
         b = b.opacity(0.65).cursor(CursorStyle::OperationNotAllowed);
@@ -283,7 +285,9 @@ pub fn seg_button(
                 .hover(|s| s.bg(t::surface_2()).text_color(t::text()))
         })
         .when(disabled, |d| d.cursor(CursorStyle::OperationNotAllowed))
-        .when_some(ic, |d, ic| d.child(icon(ic, px(15.), if pressed { t::accent() } else { fg })))
+        .when_some(ic, |d, ic| {
+            d.child(icon(ic, px(15.), if pressed { t::accent() } else { fg }))
+        })
         .child(text.to_string())
 }
 
@@ -422,8 +426,16 @@ pub fn radio_sub(text: &str) -> Div {
 /// Lays the scroll bar over the right edge of `area`, which scrolls and
 /// tracks `handle`; the bar shows only when there is more to see. The column
 /// returned stands in for `area` in the layout, so size it as `area` was.
-pub fn with_scroll_bar(id: impl Into<ElementId>, area: impl IntoElement, handle: &ScrollHandle) -> Stateful<Div> {
-    col().id(id).relative().child(area).vertical_scrollbar(handle)
+pub fn with_scroll_bar(
+    id: impl Into<ElementId>,
+    area: impl IntoElement,
+    handle: &ScrollHandle,
+) -> Stateful<Div> {
+    col()
+        .id(id)
+        .relative()
+        .child(area)
+        .vertical_scrollbar(handle)
 }
 
 // ─── text blocks ───────────────────────────────────────────
@@ -463,4 +475,3 @@ pub fn empty_state(title: &str, body: impl IntoElement, actions: Vec<AnyElement>
             }),
     )
 }
-

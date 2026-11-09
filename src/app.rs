@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    PathPromptOptions, Pixels, ScrollHandle, Subscription, Task, Window,
+    PathPromptOptions, Pixels, RenderImage, ScrollHandle, Subscription, Task, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 
@@ -177,8 +177,14 @@ impl ExtractState {
             let sub = if !s.text {
                 format!("{} · image subtitles, cannot be read as text", s.codec)
             } else {
-                let cues = s.cues.map(|n| format!("{n} cues")).unwrap_or_else(|| "unreadable".into());
-                let span = s.span_ms.map(|ms| format!(" · {}", &srt_time(ms)[..8])).unwrap_or_default();
+                let cues = s
+                    .cues
+                    .map(|n| format!("{n} cues"))
+                    .unwrap_or_else(|| "unreadable".into());
+                let span = s
+                    .span_ms
+                    .map(|ms| format!(" · {}", &srt_time(ms)[..8]))
+                    .unwrap_or_default();
                 format!("{} · {cues}{span}", s.codec)
             };
             let usable = s.text && s.cues.is_some_and(|n| n > 0);
@@ -200,7 +206,11 @@ impl ExtractState {
                 None => "",
             };
             let title = if p.audio.len() > 1 {
-                let lang = a.lang.as_deref().and_then(crate::subs::lang_from_tag).map(lang_name);
+                let lang = a
+                    .lang
+                    .as_deref()
+                    .and_then(crate::subs::lang_from_tag)
+                    .map(lang_name);
                 format!(
                     "Transcribe audio track {}{}",
                     i + 1,
@@ -219,7 +229,11 @@ impl ExtractState {
     }
 
     pub fn file_meta(&self) -> String {
-        let size = self.file.as_ref().map(|f| f.size.clone()).unwrap_or_default();
+        let size = self
+            .file
+            .as_ref()
+            .map(|f| f.size.clone())
+            .unwrap_or_default();
         match self.probe.as_ref() {
             Some(p) => {
                 let mut parts = vec![size];
@@ -339,6 +353,8 @@ pub enum Dialog {
     },
     /// The version, and getting a newer one.
     About,
+    /// What the recording is about, before its lines are corrected.
+    Correct,
 }
 
 /// How far finding and installing a new version has got.
@@ -349,8 +365,15 @@ pub enum UpdateState {
     UpToDate,
     /// A newer release that is not being installed. `can_install` is false
     /// when Taurus cannot replace itself where it runs.
-    Available { release: Release, can_install: bool },
-    Installing { release: Release, pct: f32, cancel: Arc<AtomicBool> },
+    Available {
+        release: Release,
+        can_install: bool,
+    },
+    Installing {
+        release: Release,
+        pct: f32,
+        cancel: Arc<AtomicBool>,
+    },
     /// Installed; Taurus runs it from the next launch.
     Ready(String),
     Failed(String),
@@ -390,6 +413,15 @@ pub struct SummaryJob {
     /// stays 0 for a transcript short enough to go in one piece.
     pub done: usize,
     pub parts: usize,
+    pub(crate) cancel: Arc<AtomicBool>,
+}
+
+/// One project's lines being read back for misheard words.
+pub struct CorrectJob {
+    pub id: u64,
+    pub pid: String,
+    pub done: usize,
+    pub total: usize,
     pub(crate) cancel: Arc<AtomicBool>,
 }
 
@@ -437,6 +469,12 @@ pub struct Workbench {
     pub player: Option<(String, crate::player::Player)>,
     /// The project whose audio is being decoded, and where to start it.
     pub player_loading: Option<(String, i64)>,
+    /// The open project's picture, when it has a video on disk.
+    pub(crate) video: Option<crate::video::VideoDeck>,
+    pub(crate) video_seen: u64,
+    /// The frame currently on screen. The previous one is freed from the atlas.
+    pub(crate) video_frame: Option<Arc<RenderImage>>,
+    pub(crate) retired_video: Vec<Arc<RenderImage>>,
     pub scrub_bounds: Rc<Cell<Bounds<Pixels>>>,
     pub scrubbing: bool,
     /// The line under the playhead, so the list follows it once per line.
@@ -454,6 +492,7 @@ pub struct Workbench {
     pub jobs: HashMap<String, MtJob>,
     /// The summary currently being written, if any.
     pub summary_job: Option<SummaryJob>,
+    pub correcting: Option<CorrectJob>,
     pub downloads: HashMap<String, Download>,
     pub update: UpdateState,
     /// The app bundle Taurus runs from, which an update replaces. None for a
@@ -478,6 +517,8 @@ pub struct Workbench {
     pub seg_input: Entity<InputState>,
     /// A model name typed in the summary dialog, when none of the listed ones is wanted.
     pub sum_model: Entity<InputState>,
+    /// What the recording is about, typed before correcting it.
+    pub correct_about: Entity<InputState>,
     pub eng: EngineInputs,
     pub lines_scroll: ScrollHandle,
     pub summary_scroll: ScrollHandle,
@@ -495,14 +536,17 @@ impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let single =
             |window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx));
-        let pj_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
+        let pj_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
         let gl_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search terms"));
         let term_input = single(window, cx);
         let target_input = single(window, cx);
         let rename_input = single(window, cx);
         let profile_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Team call"));
         let sum_model = cx.new(|cx| InputState::new(window, cx).placeholder("qwen3:8b"));
+        let correct_about = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. A product meeting with Ann Lee and Bo Chan")
+        });
         let seg_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -559,7 +603,10 @@ impl Workbench {
                 InputEvent::PressEnter { .. } => this.rename_project(window, cx),
                 InputEvent::Blur => {
                     let empty = this.rename_input.read(cx).value().trim().is_empty();
-                    if let Some(Dialog::Rename { err, speaker: None, .. }) = &mut this.dialog {
+                    if let Some(Dialog::Rename {
+                        err, speaker: None, ..
+                    }) = &mut this.dialog
+                    {
                         *err = empty
                             .then(|| "Name the project so you can find this track again.".into());
                     }
@@ -587,6 +634,15 @@ impl Workbench {
             },
         ));
         subs.push(cx.subscribe_in(
+            &correct_about,
+            window,
+            |this, _, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.correct_now(window, cx);
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
             &seg_input,
             window,
             |this, input, ev: &InputEvent, _, cx| match ev {
@@ -596,7 +652,11 @@ impl Workbench {
                         if let Some(p) = this.current_mut() {
                             let translated = p.translate;
                             if let Some(s) = p.segs.get_mut(i) {
-                                let text = if translated { &mut s.trans } else { &mut s.orig };
+                                let text = if translated {
+                                    &mut s.trans
+                                } else {
+                                    &mut s.orig
+                                };
                                 if *text != value {
                                     *text = value;
                                 }
@@ -719,6 +779,10 @@ impl Workbench {
             new_menu: false,
             player: None,
             player_loading: None,
+            video: None,
+            video_seen: 0,
+            video_frame: None,
+            retired_video: Vec::new(),
             scrub_bounds: Rc::new(Cell::new(Bounds::default())),
             scrubbing: false,
             play_line: None,
@@ -731,6 +795,7 @@ impl Workbench {
             next_id: 1,
             jobs: HashMap::new(),
             summary_job: None,
+            correcting: None,
             downloads: HashMap::new(),
             update: UpdateState::Idle,
             app_bundle: cx.app_path().ok().and_then(|p| crate::update::bundle(&p)),
@@ -749,6 +814,7 @@ impl Workbench {
             naming_profile: None,
             seg_input,
             sum_model,
+            correct_about,
             eng,
             lines_scroll: ScrollHandle::new(),
             summary_scroll: ScrollHandle::new(),
@@ -757,7 +823,12 @@ impl Workbench {
             dialog_scroll: ScrollHandle::new(),
             _subs: subs,
         };
-        if let Some(p) = this.settings.last_capture.clone().or_else(|| this.profile(&this.settings.profile).cloned()) {
+        if let Some(p) = this
+            .settings
+            .last_capture
+            .clone()
+            .or_else(|| this.profile(&this.settings.profile).cloned())
+        {
             this.apply_profile(&p);
         }
         this._pump = Some(cx.spawn(async move |this, cx| {
@@ -781,7 +852,7 @@ impl Workbench {
 
     /// Debug builds can open straight into a flow for screenshots:
     /// `TAURUS_IMPORT=a.srt,b.vtt`, `TAURUS_EXTRACT=video.mp4`,
-    /// `TAURUS_DIALOG=engines|capture|export|translate|about`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
+    /// `TAURUS_DIALOG=engines|capture|export|translate|about|correct`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
     /// `TAURUS_SPEAKERS=1`, `TAURUS_TRANSLATE=1`, `TAURUS_VIDEO=Entire screen|<app>`.
     fn debug_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !cfg!(debug_assertions) {
@@ -806,13 +877,19 @@ impl Workbench {
         }
         if self.view == View::Editor {
             self.ensure_open_project();
+            if std::env::var("TAURUS_DIALOG").as_deref() == Ok("correct") {
+                self.open_correct(window, cx);
+            }
             if std::env::var("TAURUS_TRANSLATE").is_ok() {
                 self.translate_now(window, cx);
             }
             if std::env::var("TAURUS_SPEAKERS").is_ok() {
                 self.identify_speakers(cx);
             }
-            if let Some(ms) = std::env::var("TAURUS_PLAY").ok().and_then(|v| v.parse().ok()) {
+            if let Some(ms) = std::env::var("TAURUS_PLAY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+            {
                 self.play(Some(ms), cx);
             }
         }
@@ -958,13 +1035,23 @@ impl Workbench {
         let lines = p.segs.iter().filter(|s| s.speaker == Some(n)).count();
         let note = format!(
             "{} in this project. Leave it empty to go back to “Speaker {}”.",
-            if lines == 1 { "1 line".to_string() } else { format!("{lines} lines") },
+            if lines == 1 {
+                "1 line".to_string()
+            } else {
+                format!("{lines} lines")
+            },
             n + 1
         );
         let current = p.speakers.get(n as usize).cloned().unwrap_or_default();
         let target = p.id.clone();
-        self.rename_input.update(cx, |s, cx| s.set_value(current, window, cx));
-        self.dialog = Some(Dialog::Rename { target, speaker: Some(n), note, err: None });
+        self.rename_input
+            .update(cx, |s, cx| s.set_value(current, window, cx));
+        self.dialog = Some(Dialog::Rename {
+            target,
+            speaker: Some(n),
+            note,
+            err: None,
+        });
         self.rename_input.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
     }
@@ -972,7 +1059,11 @@ impl Workbench {
     pub fn open_translate(&mut self, cx: &mut Context<Self>) {
         let Some(p) = self.current_mut() else { return };
         if p.to == p.from {
-            p.to = if p.from == "en" { "zh".into() } else { "en".into() };
+            p.to = if p.from == "en" {
+                "zh".into()
+            } else {
+                "en".into()
+            };
         }
         self.open_select = None;
         self.dialog = Some(Dialog::Translate);
@@ -1060,7 +1151,9 @@ impl Workbench {
         }
         let name = self.profile_input.read(cx).value().trim().to_string();
         if name.is_empty() {
-            self.naming_profile = Some(Some("Name the profile so you can pick it next time.".into()));
+            self.naming_profile = Some(Some(
+                "Name the profile so you can pick it next time.".into(),
+            ));
             self.profile_input.update(cx, |s, cx| s.focus(window, cx));
             cx.notify();
             return;
@@ -1073,7 +1166,12 @@ impl Workbench {
         self.settings.profile = name.clone();
         self.naming_profile = None;
         self.save_settings_quietly();
-        self.toast(format!("Saved the “{name}” profile."), ToastKind::Ok, None, cx);
+        self.toast(
+            format!("Saved the “{name}” profile."),
+            ToastKind::Ok,
+            None,
+            cx,
+        );
     }
 
     pub fn update_profile(&mut self, cx: &mut Context<Self>) {
@@ -1082,7 +1180,12 @@ impl Workbench {
         if let Some(slot) = self.settings.profiles.iter_mut().find(|q| q.name == name) {
             *slot = p;
             self.save_settings_quietly();
-            self.toast(format!("Updated the “{name}” profile."), ToastKind::Ok, None, cx);
+            self.toast(
+                format!("Updated the “{name}” profile."),
+                ToastKind::Ok,
+                None,
+                cx,
+            );
         }
     }
 
@@ -1090,7 +1193,12 @@ impl Workbench {
         let name = std::mem::take(&mut self.settings.profile);
         self.settings.profiles.retain(|p| p.name != name);
         self.save_settings_quietly();
-        self.toast(format!("Deleted the “{name}” profile."), ToastKind::Ok, None, cx);
+        self.toast(
+            format!("Deleted the “{name}” profile."),
+            ToastKind::Ok,
+            None,
+            cx,
+        );
     }
 
     fn save_settings_quietly(&self) {
@@ -1101,24 +1209,52 @@ impl Workbench {
 
     /// Shows the project's own audio file in Finder.
     pub fn reveal_recording(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.current().and_then(|p| p.source_path.clone()) else { return };
+        let Some(path) = self.current().and_then(|p| p.source_path.clone()) else {
+            return;
+        };
         if !std::path::Path::new(&path).exists() {
-            self.toast("The audio file for this capture is gone.", ToastKind::Warn, None, cx);
+            self.toast(
+                "The audio file for this capture is gone.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
             return;
         }
-        if let Err(e) = std::process::Command::new("open").arg("-R").arg(&path).spawn() {
-            self.toast(format!("Could not open Finder: {e}."), ToastKind::Bad, None, cx);
+        if let Err(e) = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+        {
+            self.toast(
+                format!("Could not open Finder: {e}."),
+                ToastKind::Bad,
+                None,
+                cx,
+            );
         }
     }
 
     pub fn open_video(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.current().and_then(|p| p.video_path.clone()) else { return };
+        let Some(path) = self.current().and_then(|p| p.video_path.clone()) else {
+            return;
+        };
         if !std::path::Path::new(&path).exists() {
-            self.toast("The screen recording for this capture is gone.", ToastKind::Warn, None, cx);
+            self.toast(
+                "The screen recording for this capture is gone.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
             return;
         }
         if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
-            self.toast(format!("Could not open the video: {e}."), ToastKind::Bad, None, cx);
+            self.toast(
+                format!("Could not open the video: {e}."),
+                ToastKind::Bad,
+                None,
+                cx,
+            );
         }
     }
 
@@ -1136,6 +1272,11 @@ impl Workbench {
         self.editor.loading.clear();
         self.editor.review_only = false;
         self.editor.editing = None;
+        self.video = None;
+        self.video_seen = 0;
+        if let Some(frame) = self.video_frame.take() {
+            self.retired_video.push(frame);
+        }
     }
 
     // ─── toasts ────────────────────────────────────────────
@@ -1207,7 +1348,10 @@ impl Workbench {
         } else {
             Some(sel)
         };
-        if matches!(self.open_select, Some(Sel::SourceDetail | Sel::MicDetail | Sel::VideoDetail)) {
+        if matches!(
+            self.open_select,
+            Some(Sel::SourceDetail | Sel::MicDetail | Sel::VideoDetail)
+        ) {
             self.refresh_devices();
         }
         self.select_closed = None;
@@ -1245,10 +1389,25 @@ impl Workbench {
                 .iter()
                 .map(|s| (s.clone(), s.clone()))
                 .collect(),
-            Sel::MicDetail => self.live.mics.iter().map(|s| (s.clone(), s.clone())).collect(),
-            Sel::VideoDetail => self.live.videos.iter().map(|s| (s.clone(), s.clone())).collect(),
+            Sel::MicDetail => self
+                .live
+                .mics
+                .iter()
+                .map(|s| (s.clone(), s.clone()))
+                .collect(),
+            Sel::VideoDetail => self
+                .live
+                .videos
+                .iter()
+                .map(|s| (s.clone(), s.clone()))
+                .collect(),
             Sel::Profile => std::iter::once((String::new(), "No profile".to_string()))
-                .chain(self.settings.profiles.iter().map(|p| (p.name.clone(), p.name.clone())))
+                .chain(
+                    self.settings
+                        .profiles
+                        .iter()
+                        .map(|p| (p.name.clone(), p.name.clone())),
+                )
                 .collect(),
             Sel::VideoQuality => capture::VideoQuality::ALL
                 .iter()
@@ -1265,7 +1424,8 @@ impl Workbench {
             }
             Sel::SumModel => match &self.dialog {
                 Some(Dialog::Summarize { models, .. }) => {
-                    let mut v: Vec<(String, String)> = models.iter().map(|m| (m.clone(), m.clone())).collect();
+                    let mut v: Vec<(String, String)> =
+                        models.iter().map(|m| (m.clone(), m.clone())).collect();
                     v.push(("__other__".into(), "Type a model name".into()));
                     v
                 }
@@ -1356,7 +1516,12 @@ impl Workbench {
             }
             Sel::SumModel => {
                 let custom = key == "__other__";
-                if let Some(Dialog::Summarize { model, custom: slot, .. }) = &mut self.dialog {
+                if let Some(Dialog::Summarize {
+                    model,
+                    custom: slot,
+                    ..
+                }) = &mut self.dialog
+                {
                     *slot = custom;
                     if !custom {
                         *model = key;
@@ -1460,12 +1625,22 @@ impl Workbench {
                 job.cancel.store(true, Ordering::Relaxed);
             }
         }
+        if self.correcting.as_ref().is_some_and(|j| j.pid == id) {
+            if let Some(job) = self.correcting.take() {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+        }
         if let Some(p) = self.project(id).filter(|p| p.kind == Kind::Audio) {
             for file in [&p.source_path, &p.video_path].into_iter().flatten() {
                 let _ = std::fs::remove_file(file);
             }
         }
-        if self.live.draining.as_ref().is_some_and(|(pid, _)| pid == id) {
+        if self
+            .live
+            .draining
+            .as_ref()
+            .is_some_and(|(pid, _)| pid == id)
+        {
             self.live.draining = None;
         }
         self.projects.retain(|p| p.id != id);
@@ -1550,7 +1725,13 @@ impl Workbench {
     }
 
     pub fn rename_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Dialog::Rename { target, speaker, err, .. }) = &mut self.dialog else {
+        let Some(Dialog::Rename {
+            target,
+            speaker,
+            err,
+            ..
+        }) = &mut self.dialog
+        else {
             return;
         };
         let name = self.rename_input.read(cx).value().trim().to_string();
@@ -1679,7 +1860,7 @@ impl Workbench {
         (0..p.segs.len())
             .filter_map(|i| {
                 let flags = flags_for(&self.glossary, p, i);
-                (!self.editor.review_only || is_flagged(&flags)).then_some((i, flags))
+                (!self.editor.review_only || to_check(&flags)).then_some((i, flags))
             })
             .collect()
     }
@@ -1699,10 +1880,15 @@ impl Workbench {
         if self.editor.loading.contains(&i) {
             return;
         }
-        let Some(text) = self
-            .current()
-            .and_then(|p| p.segs.get(i).map(|s| if p.translate { s.trans.clone() } else { s.orig.clone() }))
-        else {
+        let Some(text) = self.current().and_then(|p| {
+            p.segs.get(i).map(|s| {
+                if p.translate {
+                    s.trans.clone()
+                } else {
+                    s.orig.clone()
+                }
+            })
+        }) else {
             return;
         };
         self.editor.active = Some(i);
@@ -1782,7 +1968,8 @@ impl Workbench {
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                this.update(cx, |this, cx| this.import_paths(paths, cx)).ok();
+                this.update(cx, |this, cx| this.import_paths(paths, cx))
+                    .ok();
             }
         })
         .detach();
@@ -2010,7 +2197,11 @@ impl Workbench {
     }
 
     pub fn copy_summary(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = self.current().map(|p| p.summary.clone()).filter(|s| !s.trim().is_empty()) else {
+        let Some(text) = self
+            .current()
+            .map(|p| p.summary.clone())
+            .filter(|s| !s.trim().is_empty())
+        else {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));

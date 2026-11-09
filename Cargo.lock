@@ -6421,7 +6421,7 @@ dependencies = [
 
 [[package]]
 name = "taurus"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6430,6 +6430,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "half",
+ "image",
  "ort",
  "rustfft",
  "screencapturekit 11.1.2",

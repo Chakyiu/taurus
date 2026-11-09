@@ -30,11 +30,15 @@ pub fn data_dir() -> PathBuf {
 
 /// Where a live capture's audio is kept, one WAV per project.
 pub fn recording_path(project_id: &str) -> PathBuf {
-    data_dir().join("recordings").join(format!("{project_id}.wav"))
+    data_dir()
+        .join("recordings")
+        .join(format!("{project_id}.wav"))
 }
 
 pub fn video_path(project_id: &str) -> PathBuf {
-    data_dir().join("recordings").join(format!("{project_id}.mp4"))
+    data_dir()
+        .join("recordings")
+        .join(format!("{project_id}.mp4"))
 }
 
 /// Models are large and shared by every library.
@@ -86,7 +90,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
             // A file we cannot read is kept aside rather than silently overwritten.
             let aside = path.with_extension(format!("broken-{}.json", crate::data::now_ms()));
             let _ = std::fs::rename(path, &aside);
-            eprintln!("taurus: {} was unreadable ({e}); moved to {}", path.display(), aside.display());
+            eprintln!(
+                "taurus: {} was unreadable ({e}); moved to {}",
+                path.display(),
+                aside.display()
+            );
             None
         }
     }

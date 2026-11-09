@@ -1,7 +1,9 @@
-//! Translation through any OpenAI-compatible `/chat/completions` endpoint:
-//! OpenAI, OpenRouter, vLLM, LM Studio or a local Ollama.
+//! Translation, summaries and corrections through any OpenAI-compatible
+//! `/chat/completions` endpoint: OpenAI, OpenRouter, vLLM, LM Studio or a
+//! local Ollama.
 
 use std::io::{BufRead, BufReader};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -28,10 +30,14 @@ pub fn glossary_rules(terms: &[&Term]) -> Vec<String> {
             Rule::Prefer if !g.target.is_empty() => {
                 Some(format!("Translate \"{}\" as \"{}\".", g.term, g.target))
             }
-            Rule::Keep => Some(format!("Keep \"{}\" exactly as written; never translate it.", g.term)),
-            Rule::Forbid if !g.target.is_empty() => {
-                Some(format!("Never translate \"{}\" as \"{}\".", g.term, g.target))
-            }
+            Rule::Keep => Some(format!(
+                "Keep \"{}\" exactly as written; never translate it.",
+                g.term
+            )),
+            Rule::Forbid if !g.target.is_empty() => Some(format!(
+                "Never translate \"{}\" as \"{}\".",
+                g.term, g.target
+            )),
             _ => None,
         })
         .collect()
@@ -56,7 +62,10 @@ pub fn translate(
         // a time is slower but always lines up.
         Err(_) if lines.len() > 1 => lines
             .iter()
-            .map(|l| request(cfg, from, to, rules, before, std::slice::from_ref(l)).map(|mut v| v.remove(0)))
+            .map(|l| {
+                request(cfg, from, to, rules, before, std::slice::from_ref(l))
+                    .map(|mut v| v.remove(0))
+            })
             .collect(),
         Err(e) => Err(e),
     }
@@ -119,12 +128,18 @@ fn chat_streamed(cfg: &MtConfig, mut body: Value, cancel: &AtomicBool) -> Result
     read_reply(BufReader::new(resp.body_mut().as_reader()), cancel)
 }
 
-fn post(agent: ureq::Agent, cfg: &MtConfig, body: &Value) -> Result<ureq::http::Response<ureq::Body>> {
+fn post(
+    agent: ureq::Agent,
+    cfg: &MtConfig,
+    body: &Value,
+) -> Result<ureq::http::Response<ureq::Body>> {
     let mut req = agent.post(format!("{}/chat/completions", cfg.url));
     if !cfg.key.is_empty() {
         req = req.header("Authorization", format!("Bearer {}", cfg.key));
     }
-    let resp = req.send_json(body).with_context(|| format!("contacting {}", cfg.url))?;
+    let resp = req
+        .send_json(body)
+        .with_context(|| format!("contacting {}", cfg.url))?;
     check(resp)
 }
 
@@ -177,29 +192,118 @@ fn strip_thinking(s: &str) -> String {
     }
 }
 
+/// Like [`json_lines`], but a single line may also come back as bare text.
 fn parse_lines(content: &str, n: usize) -> Result<Vec<String>> {
-    let json_text = match (content.find('{'), content.rfind('}')) {
+    if n == 1 && serde_json::from_str::<Value>(json_part(content)).is_err() {
+        return Ok(vec![content.trim().trim_matches('"').to_string()]);
+    }
+    json_lines(content, n)
+}
+
+/// The braces of a reply, without any prose or code fence around them.
+fn json_part(content: &str) -> &str {
+    match (content.find('{'), content.rfind('}')) {
         (Some(a), Some(b)) if b > a => &content[a..=b],
         _ => content,
-    };
-    let list: Vec<String> = match serde_json::from_str::<Value>(json_text) {
-        Ok(v) => {
-            let arr = v["t"]
-                .as_array()
-                .or_else(|| v["lines"].as_array())
-                .or_else(|| v["translations"].as_array())
-                .or_else(|| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            arr.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect()
-        }
-        Err(_) if n == 1 => vec![content.trim().trim_matches('"').to_string()],
-        Err(e) => bail!("the reply was not the expected JSON ({e})"),
-    };
+    }
+}
+
+/// Exactly `n` strings from a reply shaped `{"t": [...]}`.
+fn json_lines(content: &str, n: usize) -> Result<Vec<String>> {
+    let v: Value = serde_json::from_str(json_part(content))
+        .map_err(|e| anyhow::anyhow!("the reply was not the expected JSON ({e})"))?;
+    let list: Vec<String> = v["t"]
+        .as_array()
+        .or_else(|| v["lines"].as_array())
+        .or_else(|| v["translations"].as_array())
+        .or_else(|| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|x| x.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     if list.len() != n {
         bail!("asked for {n} lines and got {}", list.len());
     }
-    Ok(list.into_iter().map(|s| s.replace("\\n", "\n").trim().to_string()).collect())
+    Ok(list
+        .into_iter()
+        .map(|s| s.replace("\\n", "\n").trim().to_string())
+        .collect())
+}
+
+/// Neighbouring lines sent along with a batch, so it reads in context.
+const CONTEXT_LINES: usize = 3;
+
+/// Fixes what a speech engine misheard in `lines[range]`, spoken in `lang` (a
+/// language name). The lines around the range go along as context. `about`
+/// says what the recording is about, and `terms` are names and words spelled
+/// the right way. Every line comes back, unchanged when nothing was wrong.
+pub fn correct(
+    cfg: &MtConfig,
+    lang: &str,
+    about: &str,
+    terms: &[String],
+    lines: &[String],
+    range: Range<usize>,
+    cancel: &AtomicBool,
+) -> Result<Vec<String>> {
+    if range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = range.len();
+    let mut system = format!(
+        "You proofread a transcript made by automatic speech recognition. It is in {lang}, split into subtitle lines.\n\
+         - Fix only what the recognizer misheard: wrong words that sound like the right ones, misspelled names and terms, wrong characters.\n\
+         - Keep everything else exactly as it is: the wording, the word order, filler words, line breaks and punctuation.\n\
+         - Never translate, rephrase, summarize, merge, split or reorder lines. When nothing in a line is misheard, return it unchanged.\n\
+         - Reply with JSON only, shaped {{\"t\": [\"...\"]}}, holding exactly {n} strings, one for each input line, in order."
+    );
+    if !about.trim().is_empty() {
+        system.push_str("\nThe recording is about: ");
+        system.push_str(about.trim());
+    }
+    if !terms.is_empty() {
+        system.push_str("\nThese names and terms are spelled correctly; use them where the transcript means them:\n");
+        for t in terms {
+            system.push_str("- ");
+            system.push_str(t);
+            system.push('\n');
+        }
+    }
+    let user = json!({
+        "lines": &lines[range.clone()],
+        "context_before": &lines[range.start.saturating_sub(CONTEXT_LINES)..range.start],
+        "context_after": &lines[range.end..(range.end + CONTEXT_LINES).min(lines.len())],
+    });
+    let body = json!({
+        "model": cfg.model,
+        "temperature": 0.1,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user.to_string() },
+        ],
+    });
+    let content = chat_streamed(cfg, body, cancel)?;
+    match json_lines(&content, n) {
+        Ok(out) => Ok(out),
+        // Smaller models sometimes merge or drop a line; halves line up more often.
+        Err(_) if n > 1 => {
+            let mid = range.start + n / 2;
+            let mut out = correct(cfg, lang, about, terms, lines, range.start..mid, cancel)?;
+            out.extend(correct(
+                cfg,
+                lang,
+                about,
+                terms,
+                lines,
+                mid..range.end,
+                cancel,
+            )?);
+            Ok(out)
+        }
+        Err(_) => Ok(lines[range].to_vec()),
+    }
 }
 
 /// How much of a transcript one request should carry. Longer transcripts are
@@ -236,9 +340,14 @@ pub fn list_models(cfg: &MtConfig) -> Result<Vec<String>> {
     if !cfg.key.is_empty() {
         req = req.header("Authorization", format!("Bearer {}", cfg.key));
     }
-    let resp = req.call().with_context(|| format!("contacting {}", cfg.url))?;
+    let resp = req
+        .call()
+        .with_context(|| format!("contacting {}", cfg.url))?;
     let mut resp = check(resp)?;
-    let body = resp.body_mut().read_to_string().context("reading the model list")?;
+    let body = resp
+        .body_mut()
+        .read_to_string()
+        .context("reading the model list")?;
     let ids = parse_model_ids(&body);
     if ids.is_empty() {
         bail!("the endpoint did not list any models");
@@ -278,7 +387,15 @@ pub fn summarize(
             i + 1,
             parts.len()
         );
-        partials.push(one_summary(cfg, lang, long, rules, part, Some(&note), cancel)?);
+        partials.push(one_summary(
+            cfg,
+            lang,
+            long,
+            rules,
+            part,
+            Some(&note),
+            cancel,
+        )?);
     }
     progress(parts.len(), parts.len());
     let fold = if long {
@@ -286,7 +403,15 @@ pub fn summarize(
     } else {
         "These are summaries of consecutive parts of one transcript. Combine them into one short summary, without repeating yourself."
     };
-    one_summary(cfg, lang, long, rules, &partials.join("\n\n"), Some(fold), cancel)
+    one_summary(
+        cfg,
+        lang,
+        long,
+        rules,
+        &partials.join("\n\n"),
+        Some(fold),
+        cancel,
+    )
 }
 
 fn one_summary(
@@ -381,7 +506,14 @@ fn split_transcript(text: &str, max_chars: usize) -> Vec<String> {
 
 /// A one-line round trip, so the settings dialog can prove the endpoint works.
 pub fn test(cfg: &MtConfig, to: &str) -> Result<String> {
-    let out = translate(cfg, "en", to, &[], &[], &["Good evening, and welcome back.".to_string()])?;
+    let out = translate(
+        cfg,
+        "en",
+        to,
+        &[],
+        &[],
+        &["Good evening, and welcome back.".to_string()],
+    )?;
     Ok(out.into_iter().next().unwrap_or_default())
 }
 
@@ -391,12 +523,24 @@ mod tests {
 
     #[test]
     fn parses_replies() {
-        assert_eq!(parse_lines("{\"t\": [\"a\", \"b\"]}", 2).unwrap(), vec!["a", "b"]);
+        assert_eq!(
+            parse_lines("{\"t\": [\"a\", \"b\"]}", 2).unwrap(),
+            vec!["a", "b"]
+        );
         assert_eq!(
             parse_lines("<think>hmm</think>\n```json\n{\"t\":[\"x\"]}\n```", 1).unwrap(),
             vec!["x"]
         );
         assert!(parse_lines("{\"t\": [\"a\"]}", 2).is_err());
+        assert_eq!(
+            parse_lines("Just the line.", 1).unwrap(),
+            vec!["Just the line."]
+        );
+        assert!(json_lines("Just the line.", 1).is_err());
+        assert_eq!(
+            json_lines("Sure: {\"t\": [\"a\\\\nb\"]}", 1).unwrap(),
+            vec!["a\nb"]
+        );
         assert_eq!(strip_thinking("<think>a</think> ok"), "ok");
         assert_eq!(plain_prose("```markdown\nSummary: Hello.\n```"), "Hello.");
         assert_eq!(plain_prose("摘要：晚饭谈完了。"), "晚饭谈完了。");
@@ -428,7 +572,10 @@ mod tests {
         let whole = "{\"choices\":[{\"message\":{\"content\":\"In one piece.\"}}]}";
         assert_eq!(read_reply(whole.as_bytes(), &go).unwrap(), "In one piece.");
         let failed = "data: {\"error\":{\"message\":\"model not found\"}}\n\n";
-        assert_eq!(read_reply(failed.as_bytes(), &go).unwrap_err().to_string(), "model not found");
+        assert_eq!(
+            read_reply(failed.as_bytes(), &go).unwrap_err().to_string(),
+            "model not found"
+        );
         assert!(read_reply(sse.as_bytes(), &AtomicBool::new(true)).is_err());
     }
 }

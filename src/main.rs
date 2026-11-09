@@ -14,6 +14,7 @@ mod subs;
 mod theme;
 mod ui;
 mod update;
+mod video;
 mod views;
 mod work;
 

@@ -1,6 +1,6 @@
 [package]
 name = "taurus"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Taurus, a subtitle translation workbench"
 
@@ -26,6 +26,7 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
 rustfft = "6"
 half = "2"
 sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.dev]
 opt-level = 1

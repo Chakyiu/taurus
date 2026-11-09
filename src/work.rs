@@ -13,7 +13,9 @@ use crate::app::*;
 use crate::capture::{self, CaptureKind};
 use crate::data::*;
 use crate::engine::asr::{AsrSeg, Engine};
-use crate::engine::{AsrChoice, QwenModel, Settings, WhisperModel, friendly, model_name, mt, speaker};
+use crate::engine::{
+    AsrChoice, QwenModel, Settings, WhisperModel, friendly, model_name, mt, speaker,
+};
 use crate::live::{self, LiveEvent};
 use crate::media::{self, Probe};
 use crate::store;
@@ -21,27 +23,97 @@ use crate::subs::{self, is_cjk};
 use crate::update::{self, Release};
 
 pub enum Bg {
-    Lines { pid: String, job: u64, lines: Vec<(usize, String)> },
-    MtFailed { pid: String, job: u64, error: String },
-    MtDone { pid: String, job: u64 },
-    LiveLine { pid: String, seg: usize, result: Result<String, String> },
-    Probed { job: u64, result: Result<Probe, String> },
-    Stage { job: u64, stage: usize, state: StageState, note: String },
-    Extracted { job: u64, segs: Vec<Segment> },
-    ExtractFailed { job: u64, error: String },
-    Download { id: String, pct: f32 },
-    Downloaded { id: String, result: Result<(), String> },
+    Lines {
+        pid: String,
+        job: u64,
+        lines: Vec<(usize, String)>,
+    },
+    MtFailed {
+        pid: String,
+        job: u64,
+        error: String,
+    },
+    MtDone {
+        pid: String,
+        job: u64,
+    },
+    LiveLine {
+        pid: String,
+        seg: usize,
+        result: Result<String, String>,
+    },
+    Probed {
+        job: u64,
+        result: Result<Probe, String>,
+    },
+    Stage {
+        job: u64,
+        stage: usize,
+        state: StageState,
+        note: String,
+    },
+    Extracted {
+        job: u64,
+        segs: Vec<Segment>,
+    },
+    ExtractFailed {
+        job: u64,
+        error: String,
+    },
+    Download {
+        id: String,
+        pct: f32,
+    },
+    Downloaded {
+        id: String,
+        result: Result<(), String>,
+    },
     AsrTest(Result<String, String>),
     MtTest(Result<String, String>),
-    Playback { pid: String, result: Result<Vec<f32>, String> },
-    SpeakerProgress { pid: String, done: usize },
-    Speakers { pid: String, result: Result<Vec<usize>, String> },
-    SummaryProgress { job: u64, done: usize, parts: usize },
-    Summary { pid: String, job: u64, result: Result<String, String> },
+    Playback {
+        pid: String,
+        result: Result<Vec<f32>, String>,
+    },
+    SpeakerProgress {
+        pid: String,
+        done: usize,
+    },
+    Speakers {
+        pid: String,
+        result: Result<Vec<usize>, String>,
+    },
+    SummaryProgress {
+        job: u64,
+        done: usize,
+        parts: usize,
+    },
+    Summary {
+        pid: String,
+        job: u64,
+        result: Result<String, String>,
+    },
     SummaryModels(Result<Vec<String>, String>),
     UpdateChecked(Result<Option<Release>, String>),
     UpdateProgress(f32),
-    UpdateInstalled { version: String, result: Result<(), String> },
+    UpdateInstalled {
+        version: String,
+        result: Result<(), String>,
+    },
+    /// Each line's index, the words sent, and the words that came back.
+    Fixes {
+        pid: String,
+        job: u64,
+        lines: Vec<(usize, String, String)>,
+    },
+    FixesDone {
+        pid: String,
+        job: u64,
+    },
+    FixesFailed {
+        pid: String,
+        job: u64,
+        error: String,
+    },
 }
 
 pub struct SpeakerJob {
@@ -52,11 +124,17 @@ pub struct SpeakerJob {
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
-    let _ = std::thread::Builder::new().name(format!("taurus-{name}")).spawn(f);
+    let _ = std::thread::Builder::new()
+        .name(format!("taurus-{name}"))
+        .spawn(f);
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
 }
 
 impl Workbench {
@@ -72,6 +150,7 @@ impl Workbench {
         if self.live.status == LiveStatus::Running {
             changed = true;
         }
+        changed |= self.sync_video(cx);
         changed |= self.follow_playback();
         self.check_daily_for_update(cx);
         if self.last_save.elapsed() > Duration::from_millis(1500) {
@@ -94,9 +173,17 @@ impl Workbench {
                 self.probed(job, result);
                 if cfg!(debug_assertions) {
                     if let Ok(which) = std::env::var("TAURUS_EXTRACT_RUN") {
-                        let key = self.extract.tracks().into_iter().filter_map(|r| r.key).find(|k| {
-                            matches!((which.as_str(), k), ("audio", TrackKey::Audio(_)) | ("sub", TrackKey::Sub(_)))
-                        });
+                        let key = self
+                            .extract
+                            .tracks()
+                            .into_iter()
+                            .filter_map(|r| r.key)
+                            .find(|k| {
+                                matches!(
+                                    (which.as_str(), k),
+                                    ("audio", TrackKey::Audio(_)) | ("sub", TrackKey::Sub(_))
+                                )
+                            });
                         if let Some(k) = key {
                             self.select_track(k);
                             self.extract_run(cx);
@@ -104,7 +191,12 @@ impl Workbench {
                     }
                 }
             }
-            Bg::Stage { job, stage, state, note } => {
+            Bg::Stage {
+                job,
+                stage,
+                state,
+                note,
+            } => {
                 if job == self.extract.job {
                     if let Some(s) = self.extract.stages.get_mut(stage) {
                         s.state = state;
@@ -130,9 +222,19 @@ impl Workbench {
                     }
                 }
                 match result {
-                    Ok(()) => self.toast(format!("{} is downloaded and ready.", model_name(&id)), ToastKind::Ok, None, cx),
+                    Ok(()) => self.toast(
+                        format!("{} is downloaded and ready.", model_name(&id)),
+                        ToastKind::Ok,
+                        None,
+                        cx,
+                    ),
                     Err(e) if e == "cancelled" => {}
-                    Err(e) => self.toast(format!("The {} download failed: {e}.", model_name(&id)), ToastKind::Bad, None, cx),
+                    Err(e) => self.toast(
+                        format!("The {} download failed: {e}.", model_name(&id)),
+                        ToastKind::Bad,
+                        None,
+                        cx,
+                    ),
                 }
             }
             Bg::SpeakerProgress { pid, done } => {
@@ -156,14 +258,27 @@ impl Workbench {
                 }
             }
             Bg::UpdateInstalled { version, result } => self.update_installed(version, result, cx),
+            Bg::Fixes { pid, job, lines } => self.fixes_arrived(&pid, job, lines),
+            Bg::FixesDone { pid, job } => self.fixes_done(&pid, job, cx),
+            Bg::FixesFailed { pid, job, error } => self.fixes_failed(&pid, job, error, cx),
             Bg::AsrTest(r) => {
-                if let Some(Dialog::Engines { asr_test, testing_asr, .. }) = &mut self.dialog {
+                if let Some(Dialog::Engines {
+                    asr_test,
+                    testing_asr,
+                    ..
+                }) = &mut self.dialog
+                {
                     *asr_test = Some(r);
                     *testing_asr = false;
                 }
             }
             Bg::MtTest(r) => {
-                if let Some(Dialog::Engines { mt_test, testing_mt, .. }) = &mut self.dialog {
+                if let Some(Dialog::Engines {
+                    mt_test,
+                    testing_mt,
+                    ..
+                }) = &mut self.dialog
+                {
                     *mt_test = Some(r);
                     *testing_mt = false;
                 }
@@ -193,7 +308,12 @@ impl Workbench {
             Err(e) => {
                 if !self.save_failed {
                     self.save_failed = true;
-                    self.toast(format!("Could not save your projects: {e:#}."), ToastKind::Bad, None, cx);
+                    self.toast(
+                        format!("Could not save your projects: {e:#}."),
+                        ToastKind::Bad,
+                        None,
+                        cx,
+                    );
                 }
             }
         }
@@ -218,7 +338,9 @@ impl Workbench {
             return true;
         }
         self.toast(
-            format!("{what} is not set up yet. Point Taurus at an OpenAI-compatible endpoint first."),
+            format!(
+                "{what} is not set up yet. Point Taurus at an OpenAI-compatible endpoint first."
+            ),
             ToastKind::Warn,
             Some(("Set up engines", ToastAction::Engines)),
             cx,
@@ -227,7 +349,12 @@ impl Workbench {
     }
 
     /// Translates the given segments, or every untranslated one.
-    pub(crate) fn translate_project(&mut self, pid: &str, indices: Option<Vec<usize>>, cx: &mut Context<Self>) {
+    pub(crate) fn translate_project(
+        &mut self,
+        pid: &str,
+        indices: Option<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(p) = self.project(pid) else { return };
         let retranslate = indices.is_some();
         let idx: Vec<usize> = match indices {
@@ -289,7 +416,11 @@ impl Workbench {
                 match mt::translate(&cfg, &from, &to, &rules, &before, &lines) {
                     Ok(out) => {
                         let lines = chunk.iter().copied().zip(out).collect();
-                        let _ = tx.send(Bg::Lines { pid: pid.clone(), job, lines });
+                        let _ = tx.send(Bg::Lines {
+                            pid: pid.clone(),
+                            job,
+                            lines,
+                        });
                     }
                     Err(e) => {
                         let _ = tx.send(Bg::MtFailed {
@@ -311,7 +442,9 @@ impl Workbench {
             return;
         }
         let g = self.glossary.clone();
-        let editing = (self.project_id.as_deref() == Some(pid)).then_some(self.editor.editing).flatten();
+        let editing = (self.project_id.as_deref() == Some(pid))
+            .then_some(self.editor.editing)
+            .flatten();
         let n = lines.len();
         let (mut filled, mut changed) = (0, 0);
         let here = self.project_id.as_deref() == Some(pid);
@@ -337,7 +470,9 @@ impl Workbench {
             }
             p.progress = p.translated_pct();
         }
-        let Some(j) = self.jobs.get_mut(pid) else { return };
+        let Some(j) = self.jobs.get_mut(pid) else {
+            return;
+        };
         j.done += n;
         j.filled += filled;
         j.changed += changed;
@@ -356,9 +491,13 @@ impl Workbench {
         if self.jobs.get(pid).is_none_or(|j| j.id != job) {
             return;
         }
-        let Some(j) = self.jobs.remove(pid) else { return };
+        let Some(j) = self.jobs.remove(pid) else {
+            return;
+        };
         let g = self.glossary.clone();
-        let Some(p) = self.project_mut(pid) else { return };
+        let Some(p) = self.project_mut(pid) else {
+            return;
+        };
         if p.status == Status::Working {
             p.status = Status::Review;
         }
@@ -372,13 +511,24 @@ impl Workbench {
             }
             let mut parts = Vec::new();
             if j.filled > 0 {
-                parts.push(format!("{} filled", plural(j.filled, "empty segment", "empty segments")));
+                parts.push(format!(
+                    "{} filled",
+                    plural(j.filled, "empty segment", "empty segments")
+                ));
             }
             if j.changed > 0 {
-                parts.push(format!("{} reworded", plural(j.changed, "segment", "segments")));
+                parts.push(format!(
+                    "{} reworded",
+                    plural(j.changed, "segment", "segments")
+                ));
             }
             if parts.is_empty() {
-                self.toast("Translated again; the wording came out the same.", ToastKind::Ok, None, cx);
+                self.toast(
+                    "Translated again; the wording came out the same.",
+                    ToastKind::Ok,
+                    None,
+                    cx,
+                );
             } else {
                 self.toast(format!("{}.", parts.join(" · ")), ToastKind::Ok, None, cx);
             }
@@ -393,8 +543,18 @@ impl Workbench {
                 s.state = StageState::Done;
                 s.note = format!("{n} of {n}");
             }
-            let file = self.extract.file.as_ref().map(|f| f.name.clone()).unwrap_or_default();
-            self.toast(format!("Finished “{name}” from {file} · {n} segments, {tail}."), ToastKind::Ok, None, cx);
+            let file = self
+                .extract
+                .file
+                .as_ref()
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
+            self.toast(
+                format!("Finished “{name}” from {file} · {n} segments, {tail}."),
+                ToastKind::Ok,
+                None,
+                cx,
+            );
             return;
         }
         self.toast(
@@ -427,7 +587,9 @@ impl Workbench {
                 s.state = StageState::Failed;
                 s.note = "stopped".into();
             }
-            self.extract.failed = Some(format!("Translation stopped: {error}. The track itself is saved in the project."));
+            self.extract.failed = Some(format!(
+                "Translation stopped: {error}. The track itself is saved in the project."
+            ));
         }
         self.toast(
             format!("Translation of “{name}” stopped: {error}."),
@@ -448,7 +610,9 @@ impl Workbench {
                 .unwrap_or_else(|| "subtitles".into());
             if !subs::is_subtitle(&name) {
                 self.toast(
-                    format!("{name} is not a subtitle file. Taurus reads .srt, .vtt, .ass and .ssa."),
+                    format!(
+                        "{name} is not a subtitle file. Taurus reads .srt, .vtt, .ass and .ssa."
+                    ),
                     ToastKind::Warn,
                     None,
                     cx,
@@ -461,11 +625,21 @@ impl Workbench {
             let segs = match segs {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => {
-                    self.toast(format!("{name} has no cues in it."), ToastKind::Warn, None, cx);
+                    self.toast(
+                        format!("{name} has no cues in it."),
+                        ToastKind::Warn,
+                        None,
+                        cx,
+                    );
                     continue;
                 }
                 Err(e) => {
-                    self.toast(format!("Could not read {name}: {e:#}."), ToastKind::Bad, None, cx);
+                    self.toast(
+                        format!("Could not read {name}: {e:#}."),
+                        ToastKind::Bad,
+                        None,
+                        cx,
+                    );
                     continue;
                 }
             };
@@ -494,7 +668,9 @@ impl Workbench {
             self.projects.insert(0, p);
             made.push(id);
         }
-        let Some(last) = made.last().cloned() else { return };
+        let Some(last) = made.last().cloned() else {
+            return;
+        };
         self.project_id = Some(last.clone());
         let ready = self.settings.mt_ready();
         for id in &made {
@@ -510,7 +686,13 @@ impl Workbench {
         let p = self.project(&last).expect("just imported");
         let what = if made.len() == 1 {
             if p.translate {
-                format!("“{}” · {} cues, {} → {}", p.name, p.segs.len(), p.from, p.to)
+                format!(
+                    "“{}” · {} cues, {} → {}",
+                    p.name,
+                    p.segs.len(),
+                    p.from,
+                    p.to
+                )
             } else {
                 format!("“{}” · {} cues", p.name, p.segs.len())
             }
@@ -518,7 +700,12 @@ impl Workbench {
             format!("{} files", made.len())
         };
         if ready {
-            self.toast(format!("Imported {what}. Translating now."), ToastKind::Ok, Some(("Open", ToastAction::Open(last))), cx);
+            self.toast(
+                format!("Imported {what}. Translating now."),
+                ToastKind::Ok,
+                Some(("Open", ToastAction::Open(last))),
+                cx,
+            );
         } else {
             self.toast(
                 format!("Imported {what}. Set up translation to fill in the other language."),
@@ -577,8 +764,15 @@ impl Workbench {
                 let pick = rows
                     .iter()
                     .filter_map(|r| r.key)
-                    .find(|k| matches!(k, TrackKey::Sub(_)) && self.track_lang(*k).as_deref() != Some(to.as_str()))
-                    .or_else(|| rows.iter().filter_map(|r| r.key).find(|k| matches!(k, TrackKey::Audio(_))))
+                    .find(|k| {
+                        matches!(k, TrackKey::Sub(_))
+                            && self.track_lang(*k).as_deref() != Some(to.as_str())
+                    })
+                    .or_else(|| {
+                        rows.iter()
+                            .filter_map(|r| r.key)
+                            .find(|k| matches!(k, TrackKey::Audio(_)))
+                    })
                     .or_else(|| rows.iter().find_map(|r| r.key));
                 if let Some(k) = pick {
                     self.select_track(k);
@@ -602,7 +796,11 @@ impl Workbench {
         if let Some(lang) = self.track_lang(key) {
             self.extract.from = lang;
             if self.extract.to == self.extract.from {
-                self.extract.to = if self.extract.from == "en" { "zh".into() } else { "en".into() };
+                self.extract.to = if self.extract.from == "en" {
+                    "zh".into()
+                } else {
+                    "en".into()
+                };
             }
         }
     }
@@ -622,7 +820,9 @@ impl Workbench {
     /// Stops an extraction from its project's workspace. The project had
     /// nothing in it yet, so it goes too.
     pub fn cancel_extract(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pid) = self.extract.project_id.clone() else { return };
+        let Some(pid) = self.extract.project_id.clone() else {
+            return;
+        };
         self.extract_reset(cx);
         self.remove_project(&pid);
         self.show_view(View::Projects, window, cx);
@@ -633,12 +833,18 @@ impl Workbench {
     pub fn extracting(&self, pid: &str) -> bool {
         self.extract.project_id.as_deref() == Some(pid)
             && self.extract.failed.is_none()
-            && self.project(pid).is_some_and(|p| p.segs.is_empty() && p.status == Status::Working)
+            && self
+                .project(pid)
+                .is_some_and(|p| p.segs.is_empty() && p.status == Status::Working)
     }
 
     pub fn extract_run(&mut self, cx: &mut Context<Self>) {
-        let Some(track) = self.extract.track else { return };
-        let Some(path) = self.extract.file.as_ref().map(|f| f.path.clone()) else { return };
+        let Some(track) = self.extract.track else {
+            return;
+        };
+        let Some(path) = self.extract.file.as_ref().map(|f| f.path.clone()) else {
+            return;
+        };
         let transcribing = matches!(track, TrackKey::Audio(_));
         if transcribing && !self.settings.asr_ready() {
             self.toast(
@@ -649,7 +855,12 @@ impl Workbench {
             );
             return;
         }
-        let duration = self.extract.probe.as_ref().map(|p| p.duration_ms).unwrap_or(0);
+        let duration = self
+            .extract
+            .probe
+            .as_ref()
+            .map(|p| p.duration_ms)
+            .unwrap_or(0);
         let stage = |label: &str, state, note: String| Stage {
             label: label.into(),
             note,
@@ -659,18 +870,34 @@ impl Workbench {
             stage(
                 "Reading container",
                 StageState::Done,
-                if duration > 0 { srt_time(duration)[..8].to_string() } else { "read".into() },
+                if duration > 0 {
+                    srt_time(duration)[..8].to_string()
+                } else {
+                    "read".into()
+                },
             ),
             stage(
-                if transcribing { "Transcribing audio" } else { "Decoding the subtitle track" },
+                if transcribing {
+                    "Transcribing audio"
+                } else {
+                    "Decoding the subtitle track"
+                },
                 StageState::Run,
                 String::new(),
             ),
-            stage("Re-timing and splitting long cues", StageState::Wait, String::new()),
+            stage(
+                "Re-timing and splitting long cues",
+                StageState::Wait,
+                String::new(),
+            ),
         ];
         let translate = self.settings.translate;
         if translate {
-            self.extract.stages.push(stage("Translating with the glossary", StageState::Wait, String::new()));
+            self.extract.stages.push(stage(
+                "Translating with the glossary",
+                StageState::Wait,
+                String::new(),
+            ));
         }
         self.extract.transcribing = transcribing;
         self.extract.failed = None;
@@ -708,7 +935,12 @@ impl Workbench {
         let lang = self.extract.from.clone();
         spawn("extract", move || {
             let note = |stage: usize, state: StageState, note: String| {
-                let _ = tx.send(Bg::Stage { job, stage, state, note });
+                let _ = tx.send(Bg::Stage {
+                    job,
+                    stage,
+                    state,
+                    note,
+                });
             };
             let result = (|| -> anyhow::Result<Vec<Segment>> {
                 let mut segs = match track {
@@ -717,9 +949,9 @@ impl Workbench {
                         note(1, StageState::Done, format!("{} cues", segs.len()));
                         segs
                     }
-                    TrackKey::Audio(stream) => {
-                        transcribe_file(&path, stream, &settings, &lang, duration, &note, &tx, job, &cancel)?
-                    }
+                    TrackKey::Audio(stream) => transcribe_file(
+                        &path, stream, &settings, &lang, duration, &note, &tx, job, &cancel,
+                    )?,
                 };
                 if cancel.load(Ordering::Relaxed) {
                     anyhow::bail!("cancelled");
@@ -731,7 +963,10 @@ impl Workbench {
             })();
             let _ = match result {
                 Ok(segs) => tx.send(Bg::Extracted { job, segs }),
-                Err(e) => tx.send(Bg::ExtractFailed { job, error: format!("{e:#}") }),
+                Err(e) => tx.send(Bg::ExtractFailed {
+                    job,
+                    error: format!("{e:#}"),
+                }),
             };
         });
         cx.notify();
@@ -750,10 +985,19 @@ impl Workbench {
             self.extract_failed(job, why.into(), cx);
             return;
         }
-        let Some(id) = self.extract.project_id.clone() else { return };
-        let name = self.extract.file.as_ref().map(|f| f.name.clone()).unwrap_or_default();
+        let Some(id) = self.extract.project_id.clone() else {
+            return;
+        };
+        let name = self
+            .extract
+            .file
+            .as_ref()
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
         let n = segs.len();
-        let Some(p) = self.project_mut(&id) else { return };
+        let Some(p) = self.project_mut(&id) else {
+            return;
+        };
         p.segs = segs;
         let translate = p.translate;
         if !translate {
@@ -762,7 +1006,12 @@ impl Workbench {
         self.save_now();
         if !translate {
             self.settle_all();
-            self.toast(format!("Created the project from {name} · {n} cues."), ToastKind::Ok, None, cx);
+            self.toast(
+                format!("Created the project from {name} · {n} cues."),
+                ToastKind::Ok,
+                None,
+                cx,
+            );
         } else if self.settings.mt_ready() {
             if let Some(s) = self.extract.stages.get_mut(3) {
                 s.state = StageState::Run;
@@ -799,11 +1048,21 @@ impl Workbench {
         }
         let error = error.trim_end_matches('.').to_string();
         self.extract.failed = Some(format!("{}.", capitalise(&error)));
-        if let Some(p) = self.extract.project_id.clone().and_then(|id| self.project_mut(&id)) {
+        if let Some(p) = self
+            .extract
+            .project_id
+            .clone()
+            .and_then(|id| self.project_mut(&id))
+        {
             p.status = Status::Failed;
             p.error = Some(capitalise(&error));
         }
-        self.toast(format!("Extraction failed: {error}."), ToastKind::Bad, None, cx);
+        self.toast(
+            format!("Extraction failed: {error}."),
+            ToastKind::Bad,
+            None,
+            cx,
+        );
     }
 
     // ─── live ──────────────────────────────────────────────
@@ -825,7 +1084,12 @@ impl Workbench {
                 }
                 self.live.t0 = Some(Instant::now());
                 self.live.status = LiveStatus::Running;
-                if let Some(p) = self.live.project_id.clone().and_then(|id| self.project_mut(&id)) {
+                if let Some(p) = self
+                    .live
+                    .project_id
+                    .clone()
+                    .and_then(|id| self.project_mut(&id))
+                {
                     p.status = Status::Live;
                 }
                 cx.notify();
@@ -865,12 +1129,14 @@ impl Workbench {
         let lang = self.live.from.clone();
         let pid = self.fresh_id("p");
         let audio = store::recording_path(&pid);
-        let video = (self.live.can_video && self.live.video != capture::NO_VIDEO).then(|| live::VideoPlan {
-            target: self.live.video.clone(),
-            quality: self.live.video_quality,
-            system_audio: self.live.source != Source::Mic,
-            microphone: self.live.source != Source::System,
-            path: store::video_path(&pid),
+        let video = (self.live.can_video && self.live.video != capture::NO_VIDEO).then(|| {
+            live::VideoPlan {
+                target: self.live.video.clone(),
+                quality: self.live.video_quality,
+                system_audio: self.live.source != Source::Mic,
+                microphone: self.live.source != Source::System,
+                path: store::video_path(&pid),
+            }
         });
         let video_path = video.as_ref().map(|v| v.path.clone());
         cx.spawn(async move |this, cx| {
@@ -879,7 +1145,10 @@ impl Workbench {
                 .background_executor()
                 .spawn(async move { live::start(&settings, kind, lang, 0, &path, video) })
                 .await;
-            this.update(cx, |this, cx| this.live_started(res, pid, audio, video_path, cx)).ok();
+            this.update(cx, |this, cx| {
+                this.live_started(res, pid, audio, video_path, cx)
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -897,14 +1166,22 @@ impl Workbench {
         let session = match res {
             Ok(s) => s,
             Err(e) => {
-                self.toast(format!("Could not start listening: {e:#}."), ToastKind::Bad, None, cx);
+                self.toast(
+                    format!("Could not start listening: {e:#}."),
+                    ToastKind::Bad,
+                    None,
+                    cx,
+                );
                 return;
             }
         };
         self.live.reset_session();
         self.live.engine_note = Some(match self.settings.asr {
             AsrChoice::Whisper => format!("Loading Whisper {}…", self.settings.whisper_model),
-            AsrChoice::QwenLocal => format!("Loading Qwen3-ASR {}…", self.settings.qwen_local_model.to_uppercase()),
+            AsrChoice::QwenLocal => format!(
+                "Loading Qwen3-ASR {}…",
+                self.settings.qwen_local_model.to_uppercase()
+            ),
             AsrChoice::Qwen => "Connecting to Qwen3-ASR…".into(),
         });
         self.start_capture_project(pid.clone(), audio, cx);
@@ -938,7 +1215,11 @@ impl Workbench {
     /// audio, so a capture has no unsaved state.
     fn start_capture_project(&mut self, id: String, audio: PathBuf, cx: &mut Context<Self>) {
         let now = chrono::Local::now();
-        let name = format!("{} · {}", self.live.source.label(), now.format("%-d %b %H:%M"));
+        let name = format!(
+            "{} · {}",
+            self.live.source.label(),
+            now.format("%-d %b %H:%M")
+        );
         let p = Project::new(
             id.clone(),
             Kind::Audio,
@@ -994,7 +1275,9 @@ impl Workbench {
             self.live.draining = Some((pid.clone(), s));
         }
         let g = self.glossary.clone();
-        let Some(p) = self.project_mut(&pid) else { return };
+        let Some(p) = self.project_mut(&pid) else {
+            return;
+        };
         p.status = Status::Review;
         settle_status(&g, p);
         let name = p.name.clone();
@@ -1010,9 +1293,16 @@ impl Workbench {
             );
             return;
         }
-        let tail = if open > 0 { format!("{open} needing review") } else { "all clear".into() };
+        let tail = if open > 0 {
+            format!("{open} needing review")
+        } else {
+            "all clear".into()
+        };
         self.toast(
-            format!("“{name}” is in Projects · {}, {tail}.", plural(n, "segment", "segments")),
+            format!(
+                "“{name}” is in Projects · {}, {tail}.",
+                plural(n, "segment", "segments")
+            ),
             ToastKind::Ok,
             Some(("Open", ToastAction::Open(pid))),
             cx,
@@ -1044,24 +1334,33 @@ impl Workbench {
                 }
                 LiveEvent::Partial(text) => {
                     if live {
-                        self.live.partial = (!text.trim().is_empty()).then(|| self.partial_line(&text));
+                        self.live.partial =
+                            (!text.trim().is_empty()).then(|| self.partial_line(&text));
                     }
                 }
-                LiveEvent::Final { start_ms, end_ms, text } => {
+                LiveEvent::Final {
+                    start_ms,
+                    end_ms,
+                    text,
+                } => {
                     let pid = drain_pid.or_else(|| self.live.project_id.clone());
                     if let Some(pid) = pid {
                         self.commit_line(&pid, start_ms, end_ms, &text, live);
                     }
                 }
                 LiveEvent::Error(e) => {
-                    let repeat = self
-                        .live
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|(m, at)| *m == e && at.elapsed() < Duration::from_secs(20));
+                    let repeat =
+                        self.live.last_error.as_ref().is_some_and(|(m, at)| {
+                            *m == e && at.elapsed() < Duration::from_secs(20)
+                        });
                     if !repeat {
                         self.live.last_error = Some((e.clone(), Instant::now()));
-                        self.toast(format!("Speech recognition: {e}."), ToastKind::Bad, None, cx);
+                        self.toast(
+                            format!("Speech recognition: {e}."),
+                            ToastKind::Bad,
+                            None,
+                            cx,
+                        );
                     }
                 }
                 LiveEvent::Stopped => {
@@ -1115,15 +1414,30 @@ impl Workbench {
         let Some(p) = self.project(pid) else { return };
         let (from, to) = (p.from.clone(), p.to.clone());
         let translate = p.translate && self.settings.mt_ready();
-        let before: Vec<String> = p.segs.iter().rev().take(3).rev().map(|s| s.orig.clone()).collect();
-        let Some(p) = self.project_mut(pid) else { return };
+        let before: Vec<String> = p
+            .segs
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .map(|s| s.orig.clone())
+            .collect();
+        let Some(p) = self.project_mut(pid) else {
+            return;
+        };
         if let Some(prev) = p.segs.last_mut() {
             if prev.out_ms > start_ms - MIN_GAP_MS {
                 prev.out_ms = (start_ms - MIN_GAP_MS).max(prev.in_ms + 300);
             }
         }
-        let start_ms = p.segs.last().map(|s| s.out_ms + MIN_GAP_MS).unwrap_or(0).max(start_ms);
-        p.segs.push(Segment::new(start_ms, end_ms.max(start_ms + 500), text, ""));
+        let start_ms = p
+            .segs
+            .last()
+            .map(|s| s.out_ms + MIN_GAP_MS)
+            .unwrap_or(0)
+            .max(start_ms);
+        p.segs
+            .push(Segment::new(start_ms, end_ms.max(start_ms + 500), text, ""));
         let seg = p.segs.len() - 1;
         if live || self.live.draining.as_ref().is_some_and(|(d, _)| d == pid) {
             self.live.partial = None;
@@ -1161,7 +1475,12 @@ impl Workbench {
                     .is_some_and(|(m, at)| *m == e && at.elapsed() < Duration::from_secs(20));
                 if !repeat {
                     self.live.last_error = Some((e.clone(), Instant::now()));
-                    self.toast(format!("Translation: {e}."), ToastKind::Bad, Some(("Engines", ToastAction::Engines)), cx);
+                    self.toast(
+                        format!("Translation: {e}."),
+                        ToastKind::Bad,
+                        Some(("Engines", ToastAction::Engines)),
+                        cx,
+                    );
                 }
                 return;
             }
@@ -1187,7 +1506,11 @@ impl Workbench {
     pub fn audio_source(&self, p: &Project) -> Option<PathBuf> {
         let path = PathBuf::from(p.source_path.as_ref()?);
         let recording = self.live.project_id.as_deref() == Some(p.id.as_str())
-            || self.live.draining.as_ref().is_some_and(|(id, _)| *id == p.id);
+            || self
+                .live
+                .draining
+                .as_ref()
+                .is_some_and(|(id, _)| *id == p.id);
         let ok = match p.kind {
             Kind::Audio => !recording,
             Kind::Video => media::tool("ffmpeg").is_some(),
@@ -1196,9 +1519,109 @@ impl Workbench {
         (ok && path.exists()).then_some(path)
     }
 
+    /// The picture to show with playback: a capture's screen recording, or the
+    /// video a project was extracted from. Nothing while that file is still
+    /// being recorded.
+    pub(crate) fn video_file(&self, p: &Project) -> Option<PathBuf> {
+        let recording = (self.live.project_id.as_deref() == Some(p.id.as_str())
+            && self.live.status != LiveStatus::Idle)
+            || self
+                .live
+                .draining
+                .as_ref()
+                .is_some_and(|(id, _)| id == &p.id);
+        if recording {
+            return None;
+        }
+        let pick = |stored: &String| {
+            let path = PathBuf::from(stored);
+            path.is_file().then_some(path)
+        };
+        if let Some(path) = p.video_path.as_ref().and_then(pick) {
+            return Some(path);
+        }
+        if p.kind == Kind::Video {
+            return p.source_path.as_ref().and_then(pick);
+        }
+        None
+    }
+
+    /// Where the playhead is, and whether it is moving. The loading player
+    /// counts, so the picture can seek to the spot audio will start.
+    pub(crate) fn playback_clock(&self) -> (i64, bool) {
+        let Some(pid) = &self.project_id else {
+            return (0, false);
+        };
+        if let Some((id, pl)) = &self.player {
+            if id == pid {
+                return (pl.position_ms(), pl.is_playing());
+            }
+        }
+        if let Some((id, ms)) = &self.player_loading {
+            if id == pid {
+                return (*ms, false);
+            }
+        }
+        (0, false)
+    }
+
+    fn wanted_video(&self) -> Option<PathBuf> {
+        if self.view != View::Editor {
+            return None;
+        }
+        self.current().and_then(|p| self.video_file(p))
+    }
+
+    /// Keeps the decoder on the open project's video and on the audio clock.
+    fn sync_video(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = !self.retired_video.is_empty();
+        for frame in self.retired_video.drain(..) {
+            cx.drop_image(frame, None);
+        }
+        let wanted = self.wanted_video();
+        let same = match (&self.video, &wanted) {
+            (None, None) => true,
+            (Some(deck), Some(path)) => deck.path() == path.as_path(),
+            _ => false,
+        };
+        if !same {
+            self.video = wanted.map(crate::video::VideoDeck::start);
+            self.video_seen = 0;
+            if let Some(frame) = self.video_frame.take() {
+                cx.drop_image(frame, None);
+            }
+            changed = true;
+        }
+        let (ms, on) = self.playback_clock();
+        let fresh = self.video.as_ref().and_then(|deck| {
+            deck.set_clock(ms, on);
+            let epoch = deck.generation();
+            (epoch != self.video_seen).then(|| (epoch, deck.frame()))
+        });
+        if let Some((epoch, frame)) = fresh {
+            self.video_seen = epoch;
+            if let Some(frame) = frame {
+                if let Some(old) = self.video_frame.replace(frame) {
+                    cx.drop_image(old, None);
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn push_video_clock(&self) {
+        if let Some(deck) = &self.video {
+            let (ms, on) = self.playback_clock();
+            deck.set_clock(ms, on);
+        }
+    }
+
     /// Plays from `ms`, or toggles play and pause when `ms` is `None`.
     pub fn play(&mut self, ms: Option<i64>, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
         if let Some((id, pl)) = &self.player {
             if *id == pid {
                 match ms {
@@ -1208,6 +1631,7 @@ impl Workbench {
                     }
                     None => pl.set_playing(!pl.is_playing()),
                 }
+                self.sync_video(cx);
                 cx.notify();
                 return;
             }
@@ -1215,11 +1639,15 @@ impl Workbench {
         if let Some((id, start)) = &mut self.player_loading {
             if *id == pid {
                 *start = ms.unwrap_or(*start);
+                self.sync_video(cx);
+                cx.notify();
                 return;
             }
         }
         let Some(p) = self.current() else { return };
-        let Some(path) = self.audio_source(p) else { return };
+        let Some(path) = self.audio_source(p) else {
+            return;
+        };
         let kind = p.kind;
         self.player = None;
         self.player_loading = Some((pid.clone(), ms.unwrap_or(0)));
@@ -1232,11 +1660,19 @@ impl Workbench {
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Bg::Playback { pid, result });
         });
+        self.sync_video(cx);
         cx.notify();
     }
 
-    fn playback_loaded(&mut self, pid: String, result: Result<Vec<f32>, String>, cx: &mut Context<Self>) {
-        let Some((id, start)) = self.player_loading.take() else { return };
+    fn playback_loaded(
+        &mut self,
+        pid: String,
+        result: Result<Vec<f32>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((id, start)) = self.player_loading.take() else {
+            return;
+        };
         if id != pid {
             self.player_loading = Some((id, start));
             return;
@@ -1246,6 +1682,7 @@ impl Workbench {
                 pl.seek(start);
                 pl.set_playing(true);
                 self.player = Some((pid, pl));
+                self.sync_video(cx);
             }
             Err(e) => self.toast(
                 format!("Could not play the audio: {}.", e.trim_end_matches('.')),
@@ -1261,6 +1698,7 @@ impl Workbench {
         if let Some((_, pl)) = &self.player {
             pl.set_playing(false);
         }
+        self.push_video_clock();
     }
 
     pub fn seek_ratio(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
@@ -1271,6 +1709,7 @@ impl Workbench {
         }
         let ratio = ((x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
         pl.seek((ratio as f64 * pl.duration_ms() as f64) as i64);
+        self.push_video_clock();
         cx.notify();
     }
 
@@ -1285,13 +1724,19 @@ impl Workbench {
     /// Keeps the playing line in view, once per line so scrolling by hand
     /// between lines is not fought.
     fn follow_playback(&mut self) -> bool {
-        let Some((_, pl)) = &self.player else { return false };
+        let Some((_, pl)) = &self.player else {
+            return false;
+        };
         if !pl.is_playing() {
             return self.scrubbing;
         }
         let line = self.playing_line();
         if line.is_some() && line != self.play_line && self.editor.editing.is_none() {
-            if let Some(ix) = self.visible_rows().iter().position(|(i, _)| Some(*i) == line) {
+            if let Some(ix) = self
+                .visible_rows()
+                .iter()
+                .position(|(i, _)| Some(*i) == line)
+            {
                 self.lines_scroll.scroll_to_item(ix);
             }
         }
@@ -1314,11 +1759,19 @@ impl Workbench {
 
     pub fn open_engines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let s = self.settings.clone();
-        let set = |input: &gpui::Entity<gpui_component::input::InputState>, v: String, window: &mut Window, cx: &mut Context<Self>| {
+        let set = |input: &gpui::Entity<gpui_component::input::InputState>,
+                   v: String,
+                   window: &mut Window,
+                   cx: &mut Context<Self>| {
             input.update(cx, |st, cx| st.set_value(v, window, cx));
         };
         set(&self.eng.qwen_url.clone(), s.qwen_url.clone(), window, cx);
-        set(&self.eng.qwen_model.clone(), s.qwen_model.clone(), window, cx);
+        set(
+            &self.eng.qwen_model.clone(),
+            s.qwen_model.clone(),
+            window,
+            cx,
+        );
         set(&self.eng.qwen_key.clone(), s.qwen_key.clone(), window, cx);
         set(&self.eng.mt_url.clone(), s.mt_url.clone(), window, cx);
         set(&self.eng.mt_model.clone(), s.mt_model.clone(), window, cx);
@@ -1338,9 +1791,17 @@ impl Workbench {
 
     /// The settings as the Engines dialog currently has them.
     fn engine_draft(&self, cx: &Context<Self>) -> Settings {
-        let v = |e: &gpui::Entity<gpui_component::input::InputState>| e.read(cx).value().trim().to_string();
+        let v = |e: &gpui::Entity<gpui_component::input::InputState>| {
+            e.read(cx).value().trim().to_string()
+        };
         let mut s = self.settings.clone();
-        if let Some(Dialog::Engines { asr, whisper_model, qwen_local_model, .. }) = &self.dialog {
+        if let Some(Dialog::Engines {
+            asr,
+            whisper_model,
+            qwen_local_model,
+            ..
+        }) = &self.dialog
+        {
             s.asr = *asr;
             s.whisper_model = whisper_model.clone();
             s.qwen_local_model = qwen_local_model.clone();
@@ -1363,7 +1824,12 @@ impl Workbench {
     }
 
     pub fn set_whisper_model(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(Dialog::Engines { whisper_model, asr_test, .. }) = &mut self.dialog {
+        if let Some(Dialog::Engines {
+            whisper_model,
+            asr_test,
+            ..
+        }) = &mut self.dialog
+        {
             *whisper_model = id.to_string();
             *asr_test = None;
         }
@@ -1371,7 +1837,12 @@ impl Workbench {
     }
 
     pub fn set_qwen_model(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(Dialog::Engines { qwen_local_model, asr_test, .. }) = &mut self.dialog {
+        if let Some(Dialog::Engines {
+            qwen_local_model,
+            asr_test,
+            ..
+        }) = &mut self.dialog
+        {
             *qwen_local_model = id.to_string();
             *asr_test = None;
         }
@@ -1388,7 +1859,12 @@ impl Workbench {
         let saved = store::save_settings(&self.settings);
         self.close_dialog(window, cx);
         match saved {
-            Err(e) => self.toast(format!("Could not save the engine settings: {e:#}."), ToastKind::Bad, None, cx),
+            Err(e) => self.toast(
+                format!("Could not save the engine settings: {e:#}."),
+                ToastKind::Bad,
+                None,
+                cx,
+            ),
             Ok(()) if changed_live => self.toast(
                 "Saved. The capture running now keeps its engine; the next one uses the new one.",
                 ToastKind::Ok,
@@ -1397,20 +1873,30 @@ impl Workbench {
             ),
             Ok(()) => {
                 self.warm_engine();
-                let warn = match (self.settings.asr_ready(), self.settings.mt_ready() || !self.settings.translate) {
+                let warn = match (
+                    self.settings.asr_ready(),
+                    self.settings.mt_ready() || !self.settings.translate,
+                ) {
                     (true, true) => None,
-                    (false, _) if self.settings.asr == AsrChoice::Whisper => {
-                        Some("Saved. Download the chosen Whisper model before captioning or transcribing.")
+                    (false, _) if self.settings.asr == AsrChoice::Whisper => Some(
+                        "Saved. Download the chosen Whisper model before captioning or transcribing.",
+                    ),
+                    (false, _) if self.settings.asr == AsrChoice::QwenLocal => Some(
+                        "Saved. Download the chosen Qwen3-ASR model before captioning or transcribing.",
+                    ),
+                    (false, _) => {
+                        Some("Saved. Speech recognition still needs a server address and model.")
                     }
-                    (false, _) if self.settings.asr == AsrChoice::QwenLocal => {
-                        Some("Saved. Download the chosen Qwen3-ASR model before captioning or transcribing.")
-                    }
-                    (false, _) => Some("Saved. Speech recognition still needs a server address and model."),
                     (true, false) => Some("Saved. Translation still needs an endpoint and model."),
                 };
                 match warn {
                     Some(w) => self.toast(w, ToastKind::Warn, None, cx),
-                    None => self.toast(format!("Engines saved · {}.", self.settings.summary()), ToastKind::Ok, None, cx),
+                    None => self.toast(
+                        format!("Engines saved · {}.", self.settings.summary()),
+                        ToastKind::Ok,
+                        None,
+                        cx,
+                    ),
                 }
             }
         }
@@ -1418,7 +1904,12 @@ impl Workbench {
 
     pub fn test_asr(&mut self, cx: &mut Context<Self>) {
         let s = self.engine_draft(cx);
-        if let Some(Dialog::Engines { testing_asr, asr_test, .. }) = &mut self.dialog {
+        if let Some(Dialog::Engines {
+            testing_asr,
+            asr_test,
+            ..
+        }) = &mut self.dialog
+        {
             *testing_asr = true;
             *asr_test = None;
         }
@@ -1433,7 +1924,12 @@ impl Workbench {
 
     pub fn test_mt(&mut self, cx: &mut Context<Self>) {
         let s = self.engine_draft(cx);
-        if let Some(Dialog::Engines { testing_mt, mt_test, .. }) = &mut self.dialog {
+        if let Some(Dialog::Engines {
+            testing_mt,
+            mt_test,
+            ..
+        }) = &mut self.dialog
+        {
             *testing_mt = true;
             *mt_test = None;
         }
@@ -1459,7 +1955,13 @@ impl Workbench {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        self.downloads.insert(id.to_string(), Download { pct: 0.0, cancel: cancel.clone() });
+        self.downloads.insert(
+            id.to_string(),
+            Download {
+                pct: 0.0,
+                cancel: cancel.clone(),
+            },
+        );
         let tx = self.bg_tx.clone();
         let id = id.to_string();
         spawn("download", move || {
@@ -1467,7 +1969,10 @@ impl Workbench {
             let progress = |p: f32| {
                 let pm = (p * 1000.0) as u32;
                 if pm != last.swap(pm, Ordering::Relaxed) {
-                    let _ = tx.send(Bg::Download { id: id.clone(), pct: p });
+                    let _ = tx.send(Bg::Download {
+                        id: id.clone(),
+                        pct: p,
+                    });
                 }
             };
             let result = match (whisper, qwen) {
@@ -1486,7 +1991,9 @@ impl Workbench {
     /// Tells the voices in the open project apart, fetching the model first
     /// if this is the first time.
     pub fn identify_speakers(&mut self, cx: &mut Context<Self>) {
-        let Some(pid) = self.project_id.clone() else { return };
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
         if self.speaking.is_some() || self.speaker_pending.is_some() {
             return;
         }
@@ -1501,26 +2008,44 @@ impl Workbench {
 
     pub(crate) fn run_speakers(&mut self, pid: String, cx: &mut Context<Self>) {
         let Some(p) = self.project(&pid) else { return };
-        let Some(path) = self.audio_source(p) else { return };
+        let Some(path) = self.audio_source(p) else {
+            return;
+        };
         let kind = p.kind;
         let spans: Vec<(i64, i64)> = p.segs.iter().map(|s| (s.in_ms, s.out_ms)).collect();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.speaking = Some(SpeakerJob { pid: pid.clone(), done: 0, total: spans.len(), cancel: cancel.clone() });
+        self.speaking = Some(SpeakerJob {
+            pid: pid.clone(),
+            done: 0,
+            total: spans.len(),
+            cancel: cancel.clone(),
+        });
         let tx = self.bg_tx.clone();
         spawn("speakers", move || {
             let result = (|| {
                 let pcm = match kind {
                     Kind::Audio => crate::player::read_recording(&path),
-                    _ => media::decode_audio(&path, None, |_| {}, || cancel.load(Ordering::Relaxed)),
+                    _ => {
+                        media::decode_audio(&path, None, |_| {}, || cancel.load(Ordering::Relaxed))
+                    }
                 }?;
                 let model = speaker::SpeakerModel::load()?;
                 let mut last = 0;
-                speaker::identify(&model, &pcm, &spans, |done| {
-                    if done - last >= 8 || done == spans.len() {
-                        last = done;
-                        let _ = tx.send(Bg::SpeakerProgress { pid: pid.clone(), done });
-                    }
-                }, &cancel)
+                speaker::identify(
+                    &model,
+                    &pcm,
+                    &spans,
+                    |done| {
+                        if done - last >= 8 || done == spans.len() {
+                            last = done;
+                            let _ = tx.send(Bg::SpeakerProgress {
+                                pid: pid.clone(),
+                                done,
+                            });
+                        }
+                    },
+                    &cancel,
+                )
             })()
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Bg::Speakers { pid, result });
@@ -1538,7 +2063,12 @@ impl Workbench {
         cx.notify();
     }
 
-    fn speakers_found(&mut self, pid: String, result: Result<Vec<usize>, String>, cx: &mut Context<Self>) {
+    fn speakers_found(
+        &mut self,
+        pid: String,
+        result: Result<Vec<usize>, String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.speaking.as_ref().is_none_or(|j| j.pid != pid) {
             return;
         }
@@ -1546,11 +2076,18 @@ impl Workbench {
         let labels = match result {
             Ok(l) => l,
             Err(e) => {
-                self.toast(format!("Could not tell the speakers apart: {e}."), ToastKind::Bad, None, cx);
+                self.toast(
+                    format!("Could not tell the speakers apart: {e}."),
+                    ToastKind::Bad,
+                    None,
+                    cx,
+                );
                 return;
             }
         };
-        let Some(p) = self.project_mut(&pid) else { return };
+        let Some(p) = self.project_mut(&pid) else {
+            return;
+        };
         if labels.len() != p.segs.len() {
             return;
         }
@@ -1574,7 +2111,12 @@ impl Workbench {
     pub fn open_summarize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.current() else { return };
         if p.transcript().trim().is_empty() {
-            self.toast("There is nothing to summarize yet.", ToastKind::Warn, None, cx);
+            self.toast(
+                "There is nothing to summarize yet.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
             return;
         }
         let saved_lang = self.settings.summary_lang.trim();
@@ -1594,7 +2136,8 @@ impl Workbench {
             self.settings.mt_model.trim().to_string()
         };
         let long = self.settings.summary_long || p.summary_long;
-        self.sum_model.update(cx, |s, cx| s.set_value(model.clone(), window, cx));
+        self.sum_model
+            .update(cx, |s, cx| s.set_value(model.clone(), window, cx));
         self.open_select = None;
         let ready = self.settings.mt_ready();
         self.dialog = Some(Dialog::Summarize {
@@ -1628,7 +2171,14 @@ impl Workbench {
         if !self.require_endpoint("A summary", cx) {
             return;
         }
-        let Some(Dialog::Summarize { lang, model, long, custom, .. }) = &self.dialog else {
+        let Some(Dialog::Summarize {
+            lang,
+            model,
+            long,
+            custom,
+            ..
+        }) = &self.dialog
+        else {
             return;
         };
         let (lang, mut model, long, custom) = (lang.clone(), model.clone(), *long, *custom);
@@ -1636,7 +2186,12 @@ impl Workbench {
             model = self.sum_model.read(cx).value().trim().to_string();
         }
         if model.is_empty() {
-            self.toast("Name the model that should write the summary.", ToastKind::Warn, None, cx);
+            self.toast(
+                "Name the model that should write the summary.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
             return;
         }
         self.settings.summary_lang = lang.clone();
@@ -1653,7 +2208,12 @@ impl Workbench {
         let Some(p) = self.current() else { return };
         let transcript = p.transcript();
         if transcript.trim().is_empty() {
-            self.toast("There is nothing to summarize yet.", ToastKind::Warn, None, cx);
+            self.toast(
+                "There is nothing to summarize yet.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
             return;
         }
         let pid = p.id.clone();
@@ -1684,7 +2244,15 @@ impl Workbench {
             let progress = |done, parts| {
                 let _ = tx.send(Bg::SummaryProgress { job, done, parts });
             };
-            let result = mt::summarize(&cfg, &lang_label, long, &rules, &transcript, progress, &cancel);
+            let result = mt::summarize(
+                &cfg,
+                &lang_label,
+                long,
+                &rules,
+                &transcript,
+                progress,
+                &cancel,
+            );
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
@@ -1704,7 +2272,14 @@ impl Workbench {
     }
 
     fn summary_models(&mut self, result: Result<Vec<String>, String>, cx: &mut Context<Self>) {
-        let Some(Dialog::Summarize { model, models, looking, lookup_error, .. }) = &mut self.dialog else {
+        let Some(Dialog::Summarize {
+            model,
+            models,
+            looking,
+            lookup_error,
+            ..
+        }) = &mut self.dialog
+        else {
             return;
         };
         *looking = false;
@@ -1721,21 +2296,36 @@ impl Workbench {
         cx.notify();
     }
 
-    fn summary_arrived(&mut self, pid: String, job: u64, result: Result<String, String>, cx: &mut Context<Self>) {
+    fn summary_arrived(
+        &mut self,
+        pid: String,
+        job: u64,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.summary_job.as_ref().is_none_or(|j| j.id != job) {
             return;
         }
-        let Some(job) = self.summary_job.take() else { return };
+        let Some(job) = self.summary_job.take() else {
+            return;
+        };
         match result {
             Ok(text) => {
-                let Some(p) = self.project_mut(&pid) else { return };
+                let Some(p) = self.project_mut(&pid) else {
+                    return;
+                };
                 p.summary = text;
                 p.summary_lang = job.lang;
                 p.summary_model = job.model;
                 p.summary_long = job.long;
                 let name = p.name.clone();
                 self.save_now();
-                self.toast(format!("Summary written for “{name}”."), ToastKind::Ok, None, cx);
+                self.toast(
+                    format!("Summary written for “{name}”."),
+                    ToastKind::Ok,
+                    None,
+                    cx,
+                );
             }
             Err(e) => {
                 self.toast(
@@ -1748,13 +2338,242 @@ impl Workbench {
         }
     }
 
+    // ─── corrections ───────────────────────────────────────
+
+    /// Asks what the recording is about, then looks for misheard words.
+    pub fn open_correct(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(about) = self.current().map(|p| p.about.clone()) else {
+            return;
+        };
+        self.correct_about
+            .update(cx, |s, cx| s.set_value(about, window, cx));
+        self.open_select = None;
+        self.dialog = Some(Dialog::Correct);
+        cx.notify();
+    }
+
+    pub fn correct_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.dialog, Some(Dialog::Correct)) || !self.require_endpoint("Correction", cx)
+        {
+            return;
+        }
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
+        let about = self.correct_about.read(cx).value().trim().to_string();
+        if let Some(p) = self.project_mut(&pid) {
+            p.about = about.clone();
+        }
+        self.close_dialog(window, cx);
+        self.start_correcting(pid, about, cx);
+    }
+
+    fn start_correcting(&mut self, pid: String, about: String, cx: &mut Context<Self>) {
+        let Some(p) = self.project(&pid) else { return };
+        let idx: Vec<usize> = (0..p.segs.len())
+            .filter(|&i| !p.segs[i].orig.trim().is_empty())
+            .collect();
+        if idx.is_empty() {
+            self.toast(
+                "There are no lines to correct yet.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
+            return;
+        }
+        let lines: Vec<String> = idx.iter().map(|&i| p.segs[i].orig.clone()).collect();
+        let lang = lang_name(&p.from);
+        let mut terms: Vec<String> = Vec::new();
+        for g in active_glossary(&self.glossary, Some(&pid)) {
+            if !terms.contains(&g.term) {
+                terms.push(g.term.clone());
+            }
+        }
+        let cfg = self.settings.mt();
+
+        if let Some(old) = self.correcting.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        self.next_id += 1;
+        let job = self.next_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.correcting = Some(CorrectJob {
+            id: job,
+            pid: pid.clone(),
+            done: 0,
+            total: idx.len(),
+            cancel: cancel.clone(),
+        });
+        let tx = self.bg_tx.clone();
+        spawn("correct", move || {
+            for start in (0..lines.len()).step_by(mt::BATCH) {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let range = start..(start + mt::BATCH).min(lines.len());
+                match mt::correct(&cfg, &lang, &about, &terms, &lines, range.clone(), &cancel) {
+                    Ok(out) => {
+                        let fixes = range
+                            .zip(out)
+                            .map(|(k, fixed)| (idx[k], lines[k].clone(), fixed))
+                            .collect();
+                        let _ = tx.send(Bg::Fixes {
+                            pid: pid.clone(),
+                            job,
+                            lines: fixes,
+                        });
+                    }
+                    Err(_) if cancel.load(Ordering::Relaxed) => return,
+                    Err(e) => {
+                        let _ = tx.send(Bg::FixesFailed {
+                            pid,
+                            job,
+                            error: friendly(&e, &cfg.url),
+                        });
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(Bg::FixesDone { pid, job });
+        });
+        cx.notify();
+    }
+
+    fn fixes_arrived(&mut self, pid: &str, job: u64, lines: Vec<(usize, String, String)>) {
+        if self.correcting.as_ref().is_none_or(|j| j.id != job) {
+            return;
+        }
+        let n = lines.len();
+        if let Some(p) = self.project_mut(pid) {
+            for (i, sent, fixed) in lines {
+                // A line edited by hand since it was sent keeps the edit.
+                let Some(s) = p.segs.get_mut(i).filter(|s| s.orig == sent) else {
+                    continue;
+                };
+                s.fix = is_real_fix(&s.orig, &fixed).then_some(fixed);
+            }
+        }
+        if let Some(j) = self.correcting.as_mut() {
+            j.done += n;
+        }
+    }
+
+    fn fixes_done(&mut self, pid: &str, job: u64, cx: &mut Context<Self>) {
+        if self.correcting.as_ref().is_none_or(|j| j.id != job) {
+            return;
+        }
+        self.correcting = None;
+        let g = self.glossary.clone();
+        let Some(p) = self.project_mut(pid) else {
+            return;
+        };
+        settle_status(&g, p);
+        let found = p.segs.iter().filter(|s| s.fix.is_some()).count();
+        let name = p.name.clone();
+        self.save_now();
+        let text = match found {
+            0 => format!("Every line in “{name}” reads right. Nothing to correct."),
+            n => format!(
+                "{} for “{name}”. Accept or dismiss each one, or all at once.",
+                plural(n, "suggested fix", "suggested fixes")
+            ),
+        };
+        self.toast(text, ToastKind::Ok, None, cx);
+    }
+
+    fn fixes_failed(&mut self, pid: &str, job: u64, error: String, cx: &mut Context<Self>) {
+        if self.correcting.as_ref().is_none_or(|j| j.id != job) {
+            return;
+        }
+        self.correcting = None;
+        let g = self.glossary.clone();
+        if let Some(p) = self.project_mut(pid) {
+            settle_status(&g, p);
+        }
+        self.toast(
+            format!("Correction stopped: {}.", error.trim_end_matches('.')),
+            ToastKind::Bad,
+            Some(("Engines", ToastAction::Engines)),
+            cx,
+        );
+    }
+
+    /// Ends the correction; the fixes found so far stay to be decided on.
+    pub fn stop_correcting(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.correcting.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+            let g = self.glossary.clone();
+            if let Some(p) = self.project_mut(&job.pid) {
+                settle_status(&g, p);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Takes the suggested words for line `i`, or for every line with one.
+    /// A translated line is translated again, since it was made from the
+    /// misheard words.
+    pub fn accept_fixes(
+        &mut self,
+        only: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
+        let g = self.glossary.clone();
+        let Some(p) = self.project_mut(&pid) else {
+            return;
+        };
+        let mut taken = Vec::new();
+        for (i, s) in p.segs.iter_mut().enumerate() {
+            if only.is_some_and(|o| o != i) {
+                continue;
+            }
+            if let Some(fix) = s.fix.take() {
+                s.orig = fix;
+                taken.push(i);
+            }
+        }
+        let translated = p.translate;
+        settle_status(&g, p);
+        if translated && !taken.is_empty() {
+            self.retranslate(taken, window, cx);
+        }
+        self.save_now();
+        cx.notify();
+    }
+
+    /// Keeps line `i`, or every line, as it was heard.
+    pub fn dismiss_fixes(&mut self, only: Option<usize>, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
+        let g = self.glossary.clone();
+        let Some(p) = self.project_mut(&pid) else {
+            return;
+        };
+        for (i, s) in p.segs.iter_mut().enumerate() {
+            if only.is_none_or(|o| o == i) {
+                s.fix = None;
+            }
+        }
+        settle_status(&g, p);
+        self.save_now();
+        cx.notify();
+    }
+
     // ─── adding a translation later ────────────────────────
 
     pub fn translate_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.require_mt(cx) {
             return;
         }
-        let Some(pid) = self.project_id.clone() else { return };
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
         self.close_dialog(window, cx);
         if let Some(p) = self.project_mut(&pid) {
             p.translate = true;
@@ -1785,7 +2604,10 @@ impl Workbench {
 
     /// Release builds look once a day while updates are automatic.
     fn check_daily_for_update(&mut self, cx: &mut Context<Self>) {
-        let settled = matches!(self.update, UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_));
+        let settled = matches!(
+            self.update,
+            UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_)
+        );
         if update::AUTOMATIC
             && self.settings.auto_update
             && self.app_bundle.is_some()
@@ -1797,7 +2619,10 @@ impl Workbench {
     }
 
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.update, UpdateState::Checking | UpdateState::Installing { .. } | UpdateState::Ready(_)) {
+        if matches!(
+            self.update,
+            UpdateState::Checking | UpdateState::Installing { .. } | UpdateState::Ready(_)
+        ) {
             return;
         }
         self.update = UpdateState::Checking;
@@ -1807,7 +2632,8 @@ impl Workbench {
         }
         let tx = self.bg_tx.clone();
         spawn("update-check", move || {
-            let result = update::newer_release(&update::latest_url(), update::version()).map_err(|e| format!("{e:#}"));
+            let result = update::newer_release(&update::latest_url(), update::version())
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Bg::UpdateChecked(result));
         });
         cx.notify();
@@ -1817,12 +2643,16 @@ impl Workbench {
         self.update = match result {
             Ok(None) => UpdateState::UpToDate,
             Ok(Some(release)) => {
-                let can_install = release.installable() && self.app_bundle.as_deref().is_some_and(update::can_replace);
+                let can_install = release.installable()
+                    && self.app_bundle.as_deref().is_some_and(update::can_replace);
                 if can_install && update::AUTOMATIC && self.settings.auto_update {
                     self.start_install(release, cx);
                     return;
                 }
-                UpdateState::Available { release, can_install }
+                UpdateState::Available {
+                    release,
+                    can_install,
+                }
             }
             Err(e) => UpdateState::Failed(e),
         };
@@ -1831,15 +2661,25 @@ impl Workbench {
 
     /// Installs the release on offer, when asked to.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
-        if let UpdateState::Available { release, can_install: true } = &self.update {
+        if let UpdateState::Available {
+            release,
+            can_install: true,
+        } = &self.update
+        {
             self.start_install(release.clone(), cx);
         }
     }
 
     fn start_install(&mut self, release: Release, cx: &mut Context<Self>) {
-        let Some(bundle) = self.app_bundle.clone() else { return };
+        let Some(bundle) = self.app_bundle.clone() else {
+            return;
+        };
         let cancel = Arc::new(AtomicBool::new(false));
-        self.update = UpdateState::Installing { release: release.clone(), pct: 0.0, cancel: cancel.clone() };
+        self.update = UpdateState::Installing {
+            release: release.clone(),
+            pct: 0.0,
+            cancel: cancel.clone(),
+        };
         let tx = self.bg_tx.clone();
         spawn("update", move || {
             let last = AtomicU32::new(0);
@@ -1849,13 +2689,22 @@ impl Workbench {
                     let _ = tx.send(Bg::UpdateProgress(p));
                 }
             };
-            let result = update::install(&release, &bundle, progress, &cancel).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Bg::UpdateInstalled { version: release.version, result });
+            let result =
+                update::install(&release, &bundle, progress, &cancel).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Bg::UpdateInstalled {
+                version: release.version,
+                result,
+            });
         });
         cx.notify();
     }
 
-    fn update_installed(&mut self, version: String, result: Result<(), String>, cx: &mut Context<Self>) {
+    fn update_installed(
+        &mut self,
+        version: String,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
         match result {
             Ok(()) => {
                 self.update = UpdateState::Ready(version.clone());
@@ -1878,9 +2727,15 @@ impl Workbench {
 
     /// Stops a download in progress; the release stays on offer.
     pub fn stop_update(&mut self, cx: &mut Context<Self>) {
-        if let UpdateState::Installing { release, cancel, .. } = &self.update {
+        if let UpdateState::Installing {
+            release, cancel, ..
+        } = &self.update
+        {
             cancel.store(true, Ordering::Relaxed);
-            self.update = UpdateState::Available { release: release.clone(), can_install: true };
+            self.update = UpdateState::Available {
+                release: release.clone(),
+                can_install: true,
+            };
         }
         cx.notify();
     }
@@ -1900,7 +2755,9 @@ impl Workbench {
     /// The release on offer, or the list of releases, on GitHub.
     pub fn open_release_page(&mut self, cx: &mut Context<Self>) {
         let page = match &self.update {
-            UpdateState::Available { release, .. } | UpdateState::Installing { release, .. } => release.page.clone(),
+            UpdateState::Available { release, .. } | UpdateState::Installing { release, .. } => {
+                release.page.clone()
+            }
             _ => update::RELEASES.to_string(),
         };
         cx.open_url(&page);
@@ -1928,7 +2785,11 @@ fn transcribe_file(
         |ms| {
             if last.elapsed() > Duration::from_millis(400) {
                 last = Instant::now();
-                let pct = if duration > 0 { format!("reading {}%", ms * 100 / duration) } else { format!("reading {}", mmss(ms)) };
+                let pct = if duration > 0 {
+                    format!("reading {}%", ms * 100 / duration)
+                } else {
+                    format!("reading {}", mmss(ms))
+                };
                 note(1, StageState::Run, pct);
             }
         },
@@ -1943,12 +2804,18 @@ fn transcribe_file(
         Arc::new(move |p: f32| {
             let pct = (p * 100.0).clamp(0.0, 100.0) as u32;
             if pct != sent.swap(pct, Ordering::Relaxed) {
-                let _ = tx.send(Bg::Stage { job, stage: 1, state: StageState::Run, note: format!("listening {pct}%") });
+                let _ = tx.send(Bg::Stage {
+                    job,
+                    stage: 1,
+                    state: StageState::Run,
+                    note: format!("listening {pct}%"),
+                });
             }
         })
     };
     let flag = cancel.clone();
-    let segs = engine.transcribe_long(&pcm, lang, progress, &move || flag.load(Ordering::Relaxed))?;
+    let segs =
+        engine.transcribe_long(&pcm, lang, progress, &move || flag.load(Ordering::Relaxed))?;
     note(1, StageState::Done, format!("{} of audio", mmss(audio_ms)));
     Ok(segs
         .into_iter()
@@ -1981,7 +2848,13 @@ fn decode_text(b: &[u8]) -> String {
     let utf16 = |le: bool| {
         let units: Vec<u16> = b[2..]
             .chunks_exact(2)
-            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
             .collect();
         String::from_utf16_lossy(&units)
     };
@@ -2011,7 +2884,11 @@ pub fn mark_terms(text: &str, terms: &[String], cjk: bool) -> String {
     let mut terms: Vec<&String> = terms.iter().filter(|t| !t.trim().is_empty()).collect();
     terms.sort_by_key(|t| std::cmp::Reverse(t.len()));
     for t in terms {
-        let needle = if same_len { t.to_lowercase() } else { t.to_string() };
+        let needle = if same_len {
+            t.to_lowercase()
+        } else {
+            t.to_string()
+        };
         for (i, _) in hay.match_indices(&needle) {
             let (mut a, mut b) = (i, i + needle.len());
             if !cjk {
@@ -2048,14 +2925,21 @@ mod tests {
     #[test]
     fn marks_whole_words_and_cjk_runs() {
         let t = vec!["Taurus".to_string(), "decoder".to_string()];
-        assert_eq!(mark_terms("Ship Taurus, then the decoder.", &t, false), "Ship [[Taurus,]] then the [[decoder.]]");
+        assert_eq!(
+            mark_terms("Ship Taurus, then the decoder.", &t, false),
+            "Ship [[Taurus,]] then the [[decoder.]]"
+        );
         let z = vec!["解码器".to_string()];
         assert_eq!(mark_terms("新的解码器很快", &z, true), "新的[[解码器]]很快");
     }
 
     #[test]
     fn retime_pulls_overlaps_apart() {
-        let mut s = vec![Segment::new(1000, 3000, "b", ""), Segment::new(0, 1500, "a", ""), Segment::new(4000, 4000, " ", "")];
+        let mut s = vec![
+            Segment::new(1000, 3000, "b", ""),
+            Segment::new(0, 1500, "a", ""),
+            Segment::new(4000, 4000, " ", ""),
+        ];
         retime(&mut s);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].out_ms, 1000 - MIN_GAP_MS);

@@ -3,10 +3,10 @@
 //! mono floats.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -25,7 +25,10 @@ pub enum CaptureKind {
     System(Option<String>),
     Mic(Option<String>),
     /// The Mac's output and a microphone together, e.g. both sides of a call.
-    Both { app: Option<String>, mic: Option<String> },
+    Both {
+        app: Option<String>,
+        mic: Option<String>,
+    },
 }
 
 /// Stops the capture when dropped.
@@ -102,7 +105,11 @@ pub enum VideoQuality {
 }
 
 impl VideoQuality {
-    pub const ALL: [VideoQuality; 3] = [VideoQuality::Small, VideoQuality::Standard, VideoQuality::Full];
+    pub const ALL: [VideoQuality; 3] = [
+        VideoQuality::Small,
+        VideoQuality::Standard,
+        VideoQuality::Full,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -169,28 +176,46 @@ pub fn record_screen(
 ) -> Result<ScreenRecording> {
     use screencapturekit::prelude::*;
     use screencapturekit::recording_output::{
-        SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration, SCRecordingOutputFileType,
+        SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration,
+        SCRecordingOutputFileType,
     };
     if !can_record_screen() {
         bail!("recording the screen needs macOS 15 or later");
     }
-    let content = SCShareableContent::get()
-        .map_err(|e| anyhow!("Taurus needs the Screen Recording permission to record the screen ({e})"))?;
-    let display = content.displays().into_iter().next().ok_or_else(|| anyhow!("no display to record"))?;
+    let content = SCShareableContent::get().map_err(|e| {
+        anyhow!("Taurus needs the Screen Recording permission to record the screen ({e})")
+    })?;
+    let display = content
+        .displays()
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no display to record"))?;
     let filter = if target == WHOLE_SCREEN {
-        SCContentFilter::create().with_display(&display).with_excluding_windows(&[]).build()
+        SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build()
     } else {
         let apps = content.applications();
-        let picked: Vec<&SCRunningApplication> = apps.iter().filter(|a| a.application_name() == target).collect();
+        let picked: Vec<&SCRunningApplication> = apps
+            .iter()
+            .filter(|a| a.application_name() == target)
+            .collect();
         if picked.is_empty() {
             bail!("{target} is not running, so it cannot be recorded");
         }
-        SCContentFilter::create().with_display(&display).with_including_applications(&picked, &[]).build()
+        SCContentFilter::create()
+            .with_display(&display)
+            .with_including_applications(&picked, &[])
+            .build()
     }
     .map_err(|e| anyhow!("could not set up the screen recording: {e}"))?;
 
     // Retina displays report points; full quality records every pixel, within 4K.
-    let (w, h) = (display.width().max(1) as f64 * 2.0, display.height().max(1) as f64 * 2.0);
+    let (w, h) = (
+        display.width().max(1) as f64 * 2.0,
+        display.height().max(1) as f64 * 2.0,
+    );
     let scale = match quality.max_height() {
         Some(max) => (max as f64 / h).min(1.0),
         None => (3840.0 / w).min(1.0),
@@ -217,12 +242,23 @@ pub fn record_screen(
     // HEVC is about half the size of H.264 for the same picture.
     let codec = std::env::var("TAURUS_VIDEO_CODEC").ok();
     let hevc = codec.as_deref() != Some("h264")
-        && out_config.available_video_codecs().contains(&SCRecordingOutputCodec::HEVC);
-    let out_config = out_config.with_video_codec(if hevc { SCRecordingOutputCodec::HEVC } else { SCRecordingOutputCodec::H264 });
-    let output = SCRecordingOutput::new(&out_config).ok_or_else(|| anyhow!("could not create the movie file"))?;
+        && out_config
+            .available_video_codecs()
+            .contains(&SCRecordingOutputCodec::HEVC);
+    let out_config = out_config.with_video_codec(if hevc {
+        SCRecordingOutputCodec::HEVC
+    } else {
+        SCRecordingOutputCodec::H264
+    });
+    let output = SCRecordingOutput::new(&out_config)
+        .ok_or_else(|| anyhow!("could not create the movie file"))?;
     let stream = SCStream::new(&filter, &config).map_err(|e| anyhow!("{e}"))?;
-    stream.add_recording_output(&output).map_err(|e| anyhow!("could not start the screen recording: {e}"))?;
-    stream.start_capture().map_err(|e| anyhow!("could not start the screen recording: {e}"))?;
+    stream
+        .add_recording_output(&output)
+        .map_err(|e| anyhow!("could not start the screen recording: {e}"))?;
+    stream
+        .start_capture()
+        .map_err(|e| anyhow!("could not start the screen recording: {e}"))?;
     Ok(ScreenRecording { stream, output })
 }
 
@@ -262,22 +298,25 @@ fn start_both(app: Option<String>, mic: Option<String>, sink: Sender<Vec<f32>>) 
     let (sys_tx, sys_rx) = channel();
     let system = start(CaptureKind::System(app), sys_tx)?;
     let (mic_tx, mic_rx) = channel();
-    let microphone = start(CaptureKind::Mic(mic), mic_tx).map_err(|e| anyhow!("the microphone did not start: {e:#}"))?;
+    let microphone = start(CaptureKind::Mic(mic), mic_tx)
+        .map_err(|e| anyhow!("the microphone did not start: {e:#}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
-    std::thread::Builder::new().name("taurus-mix".into()).spawn(move || {
-        let _sources = (system, microphone);
-        let mut mixer = Mixer::default();
-        while !flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(20));
-            let a = drain(&sys_rx);
-            let b = drain(&mic_rx);
-            let out = mixer.push(&a, &b);
-            if !out.is_empty() && sink.send(out).is_err() {
-                break;
+    std::thread::Builder::new()
+        .name("taurus-mix".into())
+        .spawn(move || {
+            let _sources = (system, microphone);
+            let mut mixer = Mixer::default();
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+                let a = drain(&sys_rx);
+                let b = drain(&mic_rx);
+                let out = mixer.push(&a, &b);
+                if !out.is_empty() && sink.send(out).is_err() {
+                    break;
+                }
             }
-        }
-    })?;
+        })?;
     Ok(Capture { stop })
 }
 
@@ -309,7 +348,11 @@ impl Mixer {
             short.extend(std::iter::repeat_n(0.0, la.abs_diff(lb) - KEEP_LEAD));
         }
         let n = self.a.len().min(self.b.len());
-        self.a.drain(..n).zip(self.b.drain(..n)).map(|(x, y)| (x + y).clamp(-1.0, 1.0)).collect()
+        self.a
+            .drain(..n)
+            .zip(self.b.drain(..n))
+            .map(|(x, y)| (x + y).clamp(-1.0, 1.0))
+            .collect()
     }
 }
 
@@ -327,7 +370,9 @@ fn run_mic(
             .find(|d| d.description().is_ok_and(|x| x.name() == name)),
     }
     .ok_or_else(|| anyhow!("that microphone is not connected"))?;
-    let config = device.default_input_config().context("reading the microphone format")?;
+    let config = device
+        .default_input_config()
+        .context("reading the microphone format")?;
     let channels = config.channels() as usize;
     let rate = config.sample_rate() as usize;
     let mut rs = Resampler::new(rate, channels);
@@ -382,7 +427,9 @@ fn run_system(
             if !matches!(kind, SCStreamOutputType::Audio) {
                 return;
             }
-            let Ok(list) = sample.audio_buffer_list() else { return };
+            let Ok(list) = sample.audio_buffer_list() else {
+                return;
+            };
             // One channel was asked for, so the first buffer holds everything.
             if let Some(buf) = (&list).into_iter().next() {
                 let pcm: Vec<f32> = buf
@@ -406,11 +453,16 @@ fn run_system(
         .next()
         .ok_or_else(|| anyhow!("no display to capture from"))?;
     let filter = match app.as_deref() {
-        None | Some(ALL_SYSTEM) => SCContentFilter::create().with_display(&display).with_excluding_windows(&[]).build(),
+        None | Some(ALL_SYSTEM) => SCContentFilter::create()
+            .with_display(&display)
+            .with_excluding_windows(&[])
+            .build(),
         Some(name) => {
             let apps = content.applications();
-            let picked: Vec<&SCRunningApplication> =
-                apps.iter().filter(|a| a.application_name() == name).collect();
+            let picked: Vec<&SCRunningApplication> = apps
+                .iter()
+                .filter(|a| a.application_name() == name)
+                .collect();
             if picked.is_empty() {
                 bail!("{name} is not running");
             }
@@ -518,7 +570,9 @@ mod tests {
     #[test]
     fn resamples_48k_stereo_to_16k_mono() {
         let mut r = Resampler::new(48_000, 2);
-        let block: Vec<f32> = (0..9600).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let block: Vec<f32> = (0..9600)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
         let mut total = 0;
         for _ in 0..10 {
             let out = r.push(block.iter().copied());

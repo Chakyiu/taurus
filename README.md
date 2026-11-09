@@ -18,7 +18,8 @@
 - **Speaker identification.** Works out who said each line and labels it Speaker 1, Speaker 2 and so on. Click a name to rename that speaker everywhere.
 - **Translation, if you want it.** Off by default. Turn it on when you start a capture or a video, or add it to any project later. It works with any OpenAI-compatible endpoint, such as a local Ollama, and follows your glossary.
 - **Summary.** A short account of the lines, through the translation endpoint. You choose the language, the model and whether it is a few sentences or a fuller account. It stays with the project. A long recording is summarized part by part with no time limit; the panel shows which part it is on, and **Stop** ends it.
-- **Review.** Each line is checked against reading speed (17 characters per second), line length (42 characters) and the gap to the next line. "Only lines to check" shows just the lines that need work. Click any text to edit it.
+- **Correction.** Reads the lines back through the language model and suggests fixes for words the speech engine misheard: sound-alike words, misspelled names, wrong characters. Each fix shows in place, with the misheard words struck through; accept or dismiss it, or all of them at once. Nothing changes until you accept, and accepted lines in a translated project are translated again. Saying what the recording is about, and keeping names in the glossary, helps it most.
+- **Review.** Each line is checked against reading speed (17 characters per second), line length (42 characters) and the gap to the next line. "Only lines to check" shows just the lines that need work, including any with a suggested fix. Click any text to edit it.
 - **Playback.** Play the project's audio, click a timestamp to jump to it, and the list follows along. Space plays and pauses.
 - **Glossary.** Terms you prefer, keep untranslated, or never want to see. Each one applies to every project or to just one.
 - **Export.** SRT, VTT, ASS or plain text. You can include the original, the translation or both, with optional speaker names, line wrapping and merging.
@@ -75,9 +76,10 @@ The first live caption asks for **Screen & System Audio Recording** permission, 
 1. Open **Engines** and download a speech model. Whisper `base` is quick for live work; `large-v3-turbo` or Qwen3-ASR 1.7B are more accurate.
 2. Click **New** and choose **Live caption**, **From a video** or **Import subtitles**.
 3. Optionally turn on **Translate the lines** and choose a language. To translate a project later, use **Translate** in its toolbar.
-4. To label speakers, click **Identify speakers** in a project that has audio.
-5. Click **Summarize** in a project's toolbar and choose the language, the model and the length. The account is saved with the project.
-6. Click **Export** when the lines read well.
+4. To fix misheard words, click **Correct**, say what the recording is about if you like, then accept the fixes that are right.
+5. To label speakers, click **Identify speakers** in a project that has audio.
+6. Click **Summarize** in a project's toolbar and choose the language, the model and the length. The account is saved with the project.
+7. Click **Export** when the lines read well.
 
 ## Where your data lives
 
@@ -96,7 +98,7 @@ Video projects refer to the original file where it is. Taurus doesn't copy it.
 
 ```sh
 cargo test                                         # unit tests
-cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation, summaries, updates
+cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation, summaries, corrections, updates
 ```
 
 The end-to-end tests use real models and `ffmpeg`, and the speaker test uses macOS `say` voices. Any model that is missing is downloaded the first time.
@@ -107,7 +109,7 @@ Debug builds accept environment variables that open the app straight into a give
 |---|---|
 | `TAURUS_DATA_DIR=<dir>` | Use another folder for the library, settings and recordings |
 | `TAURUS_VIEW=editor\|glossary` | Start in the open project or the glossary |
-| `TAURUS_DIALOG=engines\|capture\|export\|translate\|about` | Open a dialog |
+| `TAURUS_DIALOG=engines\|capture\|export\|translate\|about\|correct` | Open a dialog (`correct` with `TAURUS_VIEW=editor`) |
 | `TAURUS_IMPORT=a.srt,b.vtt` / `TAURUS_EXTRACT=video.mp4` | Import files or pick a video |
 | `TAURUS_LIVE=system\|mic` | Start a live caption |
 | `TAURUS_PLAY=<ms>` / `TAURUS_SPEAKERS=1` / `TAURUS_TRANSLATE=1` | Play, identify speakers, or translate the open project |

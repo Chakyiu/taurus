@@ -81,17 +81,29 @@ impl QwenModel {
     /// progress covers the whole set rather than restarting per file.
     pub fn download(&self, progress: impl Fn(f32), cancel: &AtomicBool) -> Result<()> {
         let dir = self.dir();
-        let missing: Vec<&str> = FILES.iter().copied().filter(|f| !dir.join(f).is_file()).collect();
+        let missing: Vec<&str> = FILES
+            .iter()
+            .copied()
+            .filter(|f| !dir.join(f).is_file())
+            .collect();
         let sizes = self.remote_sizes().unwrap_or_default();
-        let total: u64 = missing.iter().map(|f| sizes.get(*f).copied().unwrap_or(0)).sum();
+        let total: u64 = missing
+            .iter()
+            .map(|f| sizes.get(*f).copied().unwrap_or(0))
+            .sum();
         let mut before = 0u64;
         for f in missing {
             let url = format!("https://huggingface.co/{}/resolve/main/{f}", self.repo);
-            super::fetch(&url, &dir.join(f), &mut |done, _| {
-                if total > 0 {
-                    progress((before + done) as f32 / total as f32);
-                }
-            }, cancel)
+            super::fetch(
+                &url,
+                &dir.join(f),
+                &mut |done, _| {
+                    if total > 0 {
+                        progress((before + done) as f32 / total as f32);
+                    }
+                },
+                cancel,
+            )
             .with_context(|| format!("downloading {f}"))?;
             before += sizes.get(f).copied().unwrap_or(0);
         }
@@ -100,7 +112,11 @@ impl QwenModel {
 
     fn remote_sizes(&self) -> Result<HashMap<String, u64>> {
         let url = format!("https://huggingface.co/api/models/{}/tree/main", self.repo);
-        let mut resp = super::check(super::agent(std::time::Duration::from_secs(20)).get(&url).call()?)?;
+        let mut resp = super::check(
+            super::agent(std::time::Duration::from_secs(20))
+                .get(&url)
+                .call()?,
+        )?;
         let list: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string()?)?;
         Ok(list
             .as_array()
@@ -143,30 +159,46 @@ struct Inner {
 impl Qwen {
     pub fn load(m: &QwenModel) -> Result<Qwen> {
         let dir = m.dir();
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
-        let hidden = config["decoder"]["hidden_size"].as_u64().ok_or_else(|| anyhow!("config.json has no hidden size"))? as usize;
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
+        let hidden = config["decoder"]["hidden_size"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("config.json has no hidden size"))?
+            as usize;
         let n_mels = config["mel"]["n_mels"].as_u64().unwrap_or(128) as usize;
 
         let raw = std::fs::read(dir.join("embed_tokens.bin"))?;
-        let embed: Vec<f16> = raw.chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]])).collect();
+        let embed: Vec<f16> = raw
+            .chunks_exact(2)
+            .map(|b| f16::from_le_bytes([b[0], b[1]]))
+            .collect();
         if embed.len() % hidden != 0 {
             bail!("embed_tokens.bin does not match the model width");
         }
 
-        let tok: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("tokenizer.json"))?)?;
+        let tok: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("tokenizer.json"))?)?;
         let unbyte = byte_decoder();
         let mut vocab = HashMap::new();
         let mut tokens = vec![Vec::new(); embed.len() / hidden];
-        let entries = tok["model"]["vocab"].as_object().ok_or_else(|| anyhow!("tokenizer.json has no vocabulary"))?;
+        let entries = tok["model"]["vocab"]
+            .as_object()
+            .ok_or_else(|| anyhow!("tokenizer.json has no vocabulary"))?;
         for (piece, id) in entries {
             let Some(id) = id.as_i64() else { continue };
             if let Some(slot) = tokens.get_mut(id as usize) {
-                *slot = piece.chars().filter_map(|c| unbyte.get(&c).copied()).collect();
+                *slot = piece
+                    .chars()
+                    .filter_map(|c| unbyte.get(&c).copied())
+                    .collect();
             }
             vocab.insert(piece.clone(), id);
         }
 
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
         // Core ML cannot compile these graphs' int4 matmuls and slices.
         let env = super::ort_env()?;
         let session = |file: &str| -> Result<Session> {
@@ -187,21 +219,46 @@ impl Qwen {
             init: session("decoder_init.int4.onnx")?,
             step: session("decoder_step.int4.onnx")?,
         };
-        Ok(Qwen { inner: Mutex::new(inner), embed, hidden, tokens, vocab, mel: Mel::new(n_mels, 16000.0, 8000.0) })
+        Ok(Qwen {
+            inner: Mutex::new(inner),
+            embed,
+            hidden,
+            tokens,
+            vocab,
+            mel: Mel::new(n_mels, 16000.0, 8000.0),
+        })
     }
 
     /// Transcribes one stretch of 16 kHz audio into plain text.
     pub fn transcribe(&self, pcm: &[f32], lang: &str) -> Result<String> {
         let (mel, frames) = self.mel.compute(pcm);
         let mut inner = self.inner.lock().unwrap();
-        let Inner { encoder, init, step } = &mut *inner;
+        let Inner {
+            encoder,
+            init,
+            step,
+        } = &mut *inner;
 
-        let mut out = encoder.run(ort::inputs!["mel" => Tensor::from_array(([1usize, self.mel.n_mels(), frames], mel))?])?;
-        let features: DynValue = out.remove("audio_features").ok_or_else(|| anyhow!("the encoder gave no features"))?;
+        let mut out = encoder.run(
+            ort::inputs!["mel" => Tensor::from_array(([1usize, self.mel.n_mels(), frames], mel))?],
+        )?;
+        let features: DynValue = out
+            .remove("audio_features")
+            .ok_or_else(|| anyhow!("the encoder gave no features"))?;
         drop(out);
         let audio_len = features.shape()[1] as usize;
 
-        let mut prompt = vec![IM_START, SYSTEM, NEWLINE, IM_END, NEWLINE, IM_START, USER, NEWLINE, AUDIO_START];
+        let mut prompt = vec![
+            IM_START,
+            SYSTEM,
+            NEWLINE,
+            IM_END,
+            NEWLINE,
+            IM_START,
+            USER,
+            NEWLINE,
+            AUDIO_START,
+        ];
         let audio_offset = prompt.len() as i64;
         prompt.extend(std::iter::repeat_n(AUDIO_PAD, audio_len));
         prompt.extend([AUDIO_END, IM_END, NEWLINE, IM_START, ASSISTANT, NEWLINE]);
@@ -218,8 +275,12 @@ impl Qwen {
             "audio_offset" => Tensor::from_array(([1usize], vec![audio_offset]))?,
         ])?;
         let mut next = argmax_last(&out.remove("logits").ok_or_else(|| anyhow!("no logits"))?)?;
-        let mut keys = out.remove("present_keys").ok_or_else(|| anyhow!("no KV cache"))?;
-        let mut values = out.remove("present_values").ok_or_else(|| anyhow!("no KV cache"))?;
+        let mut keys = out
+            .remove("present_keys")
+            .ok_or_else(|| anyhow!("no KV cache"))?;
+        let mut values = out
+            .remove("present_values")
+            .ok_or_else(|| anyhow!("no KV cache"))?;
         drop(out);
 
         // Speech runs well under ten tokens a second; anything past this is a loop.
@@ -229,7 +290,10 @@ impl Qwen {
         while next != ENDOFTEXT && next != IM_END && generated.len() < budget {
             generated.push(next);
             let row = next as usize * self.hidden;
-            let emb: Vec<f32> = self.embed[row..row + self.hidden].iter().map(|v| v.to_f32()).collect();
+            let emb: Vec<f32> = self.embed[row..row + self.hidden]
+                .iter()
+                .map(|v| v.to_f32())
+                .collect();
             let mut out = step.run(ort::inputs![
                 "input_embeds" => Tensor::from_array(([1usize, 1, self.hidden], emb))?,
                 "position_ids" => Tensor::from_array(([1usize, 1], vec![pos]))?,
@@ -237,8 +301,12 @@ impl Qwen {
                 "past_values" => values,
             ])?;
             next = argmax_last(&out.remove("logits").ok_or_else(|| anyhow!("no logits"))?)?;
-            keys = out.remove("present_keys").ok_or_else(|| anyhow!("no KV cache"))?;
-            values = out.remove("present_values").ok_or_else(|| anyhow!("no KV cache"))?;
+            keys = out
+                .remove("present_keys")
+                .ok_or_else(|| anyhow!("no KV cache"))?;
+            values = out
+                .remove("present_values")
+                .ok_or_else(|| anyhow!("no KV cache"))?;
             pos += 1;
         }
         Ok(self.text(&generated, is_forced))
@@ -286,10 +354,11 @@ fn argmax_last(logits: &DynValue) -> Result<i64> {
     let (shape, data) = logits.try_extract_tensor::<f32>()?;
     let vocab = *shape.last().ok_or_else(|| anyhow!("empty logits"))? as usize;
     let last = &data[data.len() - vocab..];
-    let (i, _) = last
-        .iter()
-        .enumerate()
-        .fold((0, f32::MIN), |best, (i, &v)| if v > best.1 { (i, v) } else { best });
+    let (i, _) =
+        last.iter().enumerate().fold(
+            (0, f32::MIN),
+            |best, (i, &v)| if v > best.1 { (i, v) } else { best },
+        );
     Ok(i as i64)
 }
 
@@ -305,7 +374,11 @@ fn byte_decoder() -> HashMap<char, u8> {
             n += 1;
         }
     }
-    chars.into_iter().zip(bytes).filter_map(|(c, b)| Some((char::from_u32(c)?, b as u8))).collect()
+    chars
+        .into_iter()
+        .zip(bytes)
+        .filter_map(|(c, b)| Some((char::from_u32(c)?, b as u8)))
+        .collect()
 }
 
 #[cfg(test)]

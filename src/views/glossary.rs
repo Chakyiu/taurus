@@ -37,10 +37,13 @@ impl Workbench {
         let none_match = terms.is_empty();
         let rows: Vec<AnyElement> = terms.iter().map(|g| self.term_row(g, bp, cx)).collect();
         let search = (self.glossary.len() >= SEARCH_FROM).then(|| {
-            div()
-                .w(px(260.))
-                .mb(px(8.))
-                .child(self.text_field(&self.gl_search, Some(Icon::Search), false, window, cx))
+            div().w(px(260.)).mb(px(8.)).child(self.text_field(
+                &self.gl_search,
+                Some(Icon::Search),
+                false,
+                window,
+                cx,
+            ))
         });
 
         let list = div()
@@ -64,7 +67,11 @@ impl Workbench {
                     }),
             );
         screen()
-            .child(with_scroll_bar("gl-frame", list, &self.glossary_scroll).flex_1().min_h_0())
+            .child(
+                with_scroll_bar("gl-frame", list, &self.glossary_scroll)
+                    .flex_1()
+                    .min_h_0(),
+            )
             .into_any_element()
     }
 
@@ -92,7 +99,9 @@ impl Workbench {
             None,
             false,
         )
-        .when(!bp.mobile(), |r| r.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)))
+        .when(!bp.mobile(), |r| {
+            r.opacity(0.).group_hover(group.clone(), |s| s.opacity(1.))
+        })
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.ask_delete_term(&d, cx)
@@ -107,7 +116,9 @@ impl Workbench {
             .rounded(t::R)
             .cursor_pointer()
             .hover(|s| s.bg(t::surface()))
-            .on_click(cx.listener(move |this, _, w, cx| this.open_term_dialog(Some(e.clone()), w, cx)))
+            .on_click(
+                cx.listener(move |this, _, w, cx| this.open_term_dialog(Some(e.clone()), w, cx)),
+            )
             .child(
                 row()
                     .flex_1()

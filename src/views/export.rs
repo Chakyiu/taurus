@@ -27,33 +27,52 @@ impl Workbench {
                 cx.notify();
             }))
         }));
-        let layouts = segmented().flex_wrap().children(Layout::ALL.iter().map(|l| {
-            let l = *l;
-            seg_button(
-                SharedString::from(format!("lay-{l:?}")),
-                None,
-                match l {
-                    Layout::Stacked => "Both",
-                    Layout::OrigFirst => "Original on top",
-                    Layout::Trans => "Translation",
-                    Layout::Orig => "Original",
-                },
-                e.layout == l,
-                false,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.exp.layout = l;
-                cx.notify();
-            }))
-        }));
-        let (translated, speakers) = self.current().map_or((true, false), |p| (p.translate, p.has_speakers()));
+        let layouts = segmented()
+            .flex_wrap()
+            .children(Layout::ALL.iter().map(|l| {
+                let l = *l;
+                seg_button(
+                    SharedString::from(format!("lay-{l:?}")),
+                    None,
+                    match l {
+                        Layout::Stacked => "Both",
+                        Layout::OrigFirst => "Original on top",
+                        Layout::Trans => "Translation",
+                        Layout::Orig => "Original",
+                    },
+                    e.layout == l,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.exp.layout = l;
+                    cx.notify();
+                }))
+            }));
+        let (translated, speakers) = self
+            .current()
+            .map_or((true, false), |p| (p.translate, p.has_speakers()));
         let options: [(&'static str, bool, &str, fn(&mut ExportState)); 4] = [
-            ("exp-speakers", e.speakers, "Start lines with the speaker's name", |e| e.speakers = !e.speakers),
-            ("exp-merge", e.merge, "Merge cues less than 120 ms apart", |e| e.merge = !e.merge),
-            ("exp-flagged", e.skip_flagged, "Leave out lines still to check", |e| {
-                e.skip_flagged = !e.skip_flagged
+            (
+                "exp-speakers",
+                e.speakers,
+                "Start lines with the speaker's name",
+                |e| e.speakers = !e.speakers,
+            ),
+            (
+                "exp-merge",
+                e.merge,
+                "Merge cues less than 120 ms apart",
+                |e| e.merge = !e.merge,
+            ),
+            (
+                "exp-flagged",
+                e.skip_flagged,
+                "Leave out lines still to check",
+                |e| e.skip_flagged = !e.skip_flagged,
+            ),
+            ("exp-bom", e.bom, "Add a UTF-8 byte-order mark", |e| {
+                e.bom = !e.bom
             }),
-            ("exp-bom", e.bom, "Add a UTF-8 byte-order mark", |e| e.bom = !e.bom),
         ];
         let toggles: Vec<_> = options
             .into_iter()
@@ -74,11 +93,22 @@ impl Workbench {
             .gap(px(18.))
             .child(field("Format", formats))
             .when(translated, |d| {
-                d.child(field("Lines", col().gap(px(6.)).child(layouts).child(hint(e.layout.description()))))
+                d.child(field(
+                    "Lines",
+                    col()
+                        .gap(px(6.))
+                        .child(layouts)
+                        .child(hint(e.layout.description())),
+                ))
             })
             .child(self.wrap_slider(cx))
             .child(col().gap(px(8.)).children(toggles))
-            .child(mono(div()).text_size(t::T_SMALL).text_color(t::text_2()).child(summary))
+            .child(
+                mono(div())
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(summary),
+            )
     }
 
     fn wrap_slider(&self, cx: &mut Context<Self>) -> Div {

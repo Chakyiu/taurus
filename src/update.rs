@@ -31,7 +31,9 @@ pub fn version() -> &'static str {
 }
 
 pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Debug builds honour `TAURUS_UPDATE_URL`, to try updates against a stand-in.
@@ -73,20 +75,28 @@ pub fn newer_release(url: &str, current: &str) -> Result<Option<Release>> {
     if resp.status() == 404 {
         return Ok(None);
     }
-    let body = check(resp)?.body_mut().read_to_string().context("reading the release")?;
+    let body = check(resp)?
+        .body_mut()
+        .read_to_string()
+        .context("reading the release")?;
     parse_release(&body, current)
 }
 
 fn parse_release(body: &str, current: &str) -> Result<Option<Release>> {
     let v: Value = serde_json::from_str(body).context("reading the release")?;
-    let tag = v["tag_name"].as_str().context("the release has no version")?;
+    let tag = v["tag_name"]
+        .as_str()
+        .context("the release has no version")?;
     let version = tag.trim_start_matches('v').to_string();
     let unfinished = v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true);
     if unfinished || !is_newer(&version, current) {
         return Ok(None);
     }
     let zip_suffix = format!("-macos-{}.zip", arch());
-    let assets = v["assets"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let assets = v["assets"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let find = |want: &dyn Fn(&str) -> bool| {
         assets.iter().find_map(|a| {
             let name = a["name"].as_str()?;
@@ -123,20 +133,27 @@ fn is_newer(candidate: &str, current: &str) -> bool {
         parts.next().is_none().then_some((triple, pre))
     }
     match (parse(candidate), parse(current)) {
-        (Some((new, new_pre)), Some((old, old_pre))) => new > old || (new == old && old_pre && !new_pre),
+        (Some((new, new_pre)), Some((old, old_pre))) => {
+            new > old || (new == old && old_pre && !new_pre)
+        }
         _ => false,
     }
 }
 
 /// The app bundle at `app_path`, unless Taurus runs from a development build.
 pub fn bundle(app_path: &Path) -> Option<PathBuf> {
-    app_path.extension().is_some_and(|e| e == "app").then(|| app_path.to_path_buf())
+    app_path
+        .extension()
+        .is_some_and(|e| e == "app")
+        .then(|| app_path.to_path_buf())
 }
 
 /// Whether the folder holding `bundle` takes a new app. A disk image, or an
 /// app macOS runs from a hidden copy until it is moved, does not.
 pub fn can_replace(bundle: &Path) -> bool {
-    let Some(parent) = bundle.parent() else { return false };
+    let Some(parent) = bundle.parent() else {
+        return false;
+    };
     let probe = parent.join(format!("{STAGING}-probe-{}", std::process::id()));
     let made = std::fs::create_dir(&probe).is_ok();
     let _ = std::fs::remove_dir(&probe);
@@ -145,11 +162,19 @@ pub fn can_replace(bundle: &Path) -> bool {
 
 /// Downloads `release`, checks it against its published checksum, and puts
 /// it in place of `bundle`.
-pub fn install(release: &Release, bundle: &Path, progress: impl Fn(f32), cancel: &AtomicBool) -> Result<()> {
+pub fn install(
+    release: &Release,
+    bundle: &Path,
+    progress: impl Fn(f32),
+    cancel: &AtomicBool,
+) -> Result<()> {
     let (Some((zip_name, zip_url)), Some(sums_url)) = (&release.zip, &release.sums) else {
         bail!("this release has no app to install");
     };
-    let staging = bundle.parent().context("the app has no folder")?.join(STAGING);
+    let staging = bundle
+        .parent()
+        .context("the app has no folder")?
+        .join(STAGING);
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir(&staging).context("making room for the update")?;
     let result = (|| {
@@ -162,8 +187,14 @@ pub fn install(release: &Release, bundle: &Path, progress: impl Fn(f32), cancel:
         fetch(zip_url, &zip, &mut on_bytes, cancel)?;
         let sums = read_text(sums_url).context("fetching the checksums")?;
         let want = expected_sum(&sums, zip_name).context("the checksums do not list the app")?;
-        ensure!(sha256_file(&zip)? == want, "the download does not match its checksum");
-        run(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&zip).arg(&staging))?;
+        ensure!(
+            sha256_file(&zip)? == want,
+            "the download does not match its checksum"
+        );
+        run(Command::new("/usr/bin/ditto")
+            .args(["-x", "-k"])
+            .arg(&zip)
+            .arg(&staging))?;
         let app = std::fs::read_dir(&staging)?
             .filter_map(|e| Some(e.ok()?.path()))
             .find(|p| p.extension().is_some_and(|e| e == "app"))
@@ -181,16 +212,27 @@ pub fn install(release: &Release, bundle: &Path, progress: impl Fn(f32), cancel:
 /// The unpacked app has to be Taurus, the version promised, and intact.
 fn check_app(app: &Path, version: &str) -> Result<()> {
     let plist = app.join("Contents/Info.plist");
-    ensure!(plist_value(&plist, "CFBundleIdentifier")? == BUNDLE_ID, "the download is not Taurus");
+    ensure!(
+        plist_value(&plist, "CFBundleIdentifier")? == BUNDLE_ID,
+        "the download is not Taurus"
+    );
     let found = plist_value(&plist, "CFBundleShortVersionString")?;
-    ensure!(found == version, "the download is version {found}, not {version}");
-    run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app))
+    ensure!(
+        found == version,
+        "the download is version {found}, not {version}"
+    );
+    run(Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app))
 }
 
 /// The old app is renamed within its own folder rather than moved into the
 /// staging one, which would also need write access to the app itself.
 fn swap(bundle: &Path, new_app: &Path) -> Result<()> {
-    let name = bundle.file_name().context("the app has no name")?.to_string_lossy();
+    let name = bundle
+        .file_name()
+        .context("the app has no name")?
+        .to_string_lossy();
     let old = bundle.with_file_name(format!(".{name}-old"));
     let _ = std::fs::remove_dir_all(&old);
     std::fs::rename(bundle, &old).context("moving the old app aside")?;
@@ -214,10 +256,17 @@ fn plist_value(plist: &Path, key: &str) -> Result<String> {
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
-    let name = Path::new(cmd.get_program()).file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = Path::new(cmd.get_program())
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let out = cmd.output().with_context(|| format!("running {name}"))?;
     if !out.status.success() {
-        bail!("{name} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "{name} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -230,7 +279,11 @@ fn read_text(url: &str) -> Result<String> {
 fn sha256_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     std::io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// The checksum `shasum` wrote for `name`.
@@ -275,13 +328,24 @@ mod tests {
             })
             .to_string()
         };
-        let r = parse_release(&release("v0.1.3", false), "0.1.2").unwrap().unwrap();
+        let r = parse_release(&release("v0.1.3", false), "0.1.2")
+            .unwrap()
+            .unwrap();
         assert_eq!(r.version, "0.1.3");
         assert_eq!(r.page, format!("{RELEASES}/tag/v0.1.3"));
-        assert_eq!(r.zip.as_ref().map(|(_, url)| url.as_str()), Some("https://x/t.zip"));
+        assert_eq!(
+            r.zip.as_ref().map(|(_, url)| url.as_str()),
+            Some("https://x/t.zip")
+        );
         assert!(r.installable());
-        assert_eq!(parse_release(&release("v0.1.2", false), "0.1.2").unwrap(), None);
-        assert_eq!(parse_release(&release("v0.2.0-beta.1", true), "0.1.2").unwrap(), None);
+        assert_eq!(
+            parse_release(&release("v0.1.2", false), "0.1.2").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_release(&release("v0.2.0-beta.1", true), "0.1.2").unwrap(),
+            None
+        );
         let bare = r#"{"tag_name":"v0.1.3","html_url":"https://x","assets":[]}"#;
         assert!(!parse_release(bare, "0.1.2").unwrap().unwrap().installable());
     }
@@ -289,8 +353,14 @@ mod tests {
     #[test]
     fn finds_the_checksum() {
         let sums = "9d31  Taurus-v0.1.2-macos-arm64.zip\n4cdb  Taurus-v0.1.2-macos-arm64.dmg\n";
-        assert_eq!(expected_sum(sums, "Taurus-v0.1.2-macos-arm64.dmg").as_deref(), Some("4cdb"));
-        assert_eq!(expected_sum("ABCD *t.zip", "t.zip").as_deref(), Some("abcd"));
+        assert_eq!(
+            expected_sum(sums, "Taurus-v0.1.2-macos-arm64.dmg").as_deref(),
+            Some("4cdb")
+        );
+        assert_eq!(
+            expected_sum("ABCD *t.zip", "t.zip").as_deref(),
+            Some("abcd")
+        );
         assert_eq!(expected_sum(sums, "t.zip"), None);
     }
 }
