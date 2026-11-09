@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 
 use crate::app::*;
-use crate::capture::CaptureKind;
+use crate::capture::{self, CaptureKind};
 use crate::data::*;
 use crate::engine::asr::{AsrSeg, Engine};
 use crate::engine::{AsrChoice, QwenModel, Settings, WhisperModel, friendly, model_name, mt, speaker};
@@ -35,6 +35,8 @@ pub enum Bg {
     Playback { pid: String, result: Result<Vec<f32>, String> },
     SpeakerProgress { pid: String, done: usize },
     Speakers { pid: String, result: Result<Vec<usize>, String> },
+    Summary { pid: String, job: u64, result: Result<String, String> },
+    SummaryModels(Result<Vec<String>, String>),
 }
 
 pub struct SpeakerJob {
@@ -133,6 +135,8 @@ impl Workbench {
                 }
             }
             Bg::Speakers { pid, result } => self.speakers_found(pid, result, cx),
+            Bg::Summary { pid, job, result } => self.summary_arrived(pid, job, result, cx),
+            Bg::SummaryModels(result) => self.summary_models(result, cx),
             Bg::AsrTest(r) => {
                 if let Some(Dialog::Engines { asr_test, testing_asr, .. }) = &mut self.dialog {
                     *asr_test = Some(r);
@@ -185,13 +189,17 @@ impl Workbench {
 
     // ─── translation ───────────────────────────────────────
 
-    /// Translation needs an endpoint. Without one the user is pointed at it.
+    /// Translation and summaries share one endpoint. Without one the user is pointed at it.
     pub(crate) fn require_mt(&mut self, cx: &mut Context<Self>) -> bool {
+        self.require_endpoint("Translation", cx)
+    }
+
+    fn require_endpoint(&mut self, what: &str, cx: &mut Context<Self>) -> bool {
         if self.settings.mt_ready() {
             return true;
         }
         self.toast(
-            "Translation is not set up yet. Point Taurus at an OpenAI-compatible endpoint first.",
+            format!("{what} is not set up yet. Point Taurus at an OpenAI-compatible endpoint first."),
             ToastKind::Warn,
             Some(("Set up engines", ToastAction::Engines)),
             cx,
@@ -822,21 +830,37 @@ impl Workbench {
             return;
         }
         let kind = match self.live.source {
-            Source::Mic => CaptureKind::Mic(Some(self.live.detail.clone())),
+            Source::Mic => CaptureKind::Mic(Some(self.live.mic.clone())),
+            Source::Both => CaptureKind::Both {
+                app: Some(self.live.detail.clone()),
+                mic: Some(self.live.mic.clone()),
+            },
             _ => CaptureKind::System(Some(self.live.detail.clone())),
         };
         self.live.starting = true;
+        self.settings.last_capture = Some(self.profile_from_live(""));
+        if let Err(e) = store::save_settings(&self.settings) {
+            eprintln!("saving settings: {e:#}");
+        }
         let settings = self.settings.clone();
         let lang = self.live.from.clone();
         let pid = self.fresh_id("p");
         let audio = store::recording_path(&pid);
+        let video = (self.live.can_video && self.live.video != capture::NO_VIDEO).then(|| live::VideoPlan {
+            target: self.live.video.clone(),
+            quality: self.live.video_quality,
+            system_audio: self.live.source != Source::Mic,
+            microphone: self.live.source != Source::System,
+            path: store::video_path(&pid),
+        });
+        let video_path = video.as_ref().map(|v| v.path.clone());
         cx.spawn(async move |this, cx| {
             let path = audio.clone();
             let res = cx
                 .background_executor()
-                .spawn(async move { live::start(&settings, kind, lang, 0, &path) })
+                .spawn(async move { live::start(&settings, kind, lang, 0, &path, video) })
                 .await;
-            this.update(cx, |this, cx| this.live_started(res, pid, audio, cx)).ok();
+            this.update(cx, |this, cx| this.live_started(res, pid, audio, video_path, cx)).ok();
         })
         .detach();
         cx.notify();
@@ -847,6 +871,7 @@ impl Workbench {
         res: anyhow::Result<live::LiveSession>,
         pid: String,
         audio: PathBuf,
+        video: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         self.live.starting = false;
@@ -863,7 +888,10 @@ impl Workbench {
             AsrChoice::QwenLocal => format!("Loading Qwen3-ASR {}…", self.settings.qwen_local_model.to_uppercase()),
             AsrChoice::Qwen => "Connecting to Qwen3-ASR…".into(),
         });
-        self.start_capture_project(pid, audio, cx);
+        self.start_capture_project(pid.clone(), audio, cx);
+        if let (Some(v), Some(p)) = (video, self.project_mut(&pid)) {
+            p.video_path = Some(v.to_string_lossy().to_string());
+        }
         self.project_id = self.live.project_id.clone();
         self.reset_editor_view();
         if matches!(self.dialog, Some(Dialog::Capture)) {
@@ -1519,6 +1547,172 @@ impl Workbench {
             format!("Found {n} speakers. Click a name to rename it.")
         };
         self.toast(text, ToastKind::Ok, None, cx);
+    }
+
+    // ─── summary ───────────────────────────────────────────
+
+    /// Asks which language, model and length to use, then writes the summary.
+    pub fn open_summarize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.current() else { return };
+        if p.transcript().trim().is_empty() {
+            self.toast("There is nothing to summarize yet.", ToastKind::Warn, None, cx);
+            return;
+        }
+        let saved_lang = self.settings.summary_lang.trim();
+        let lang = if LANGS.iter().any(|(c, _)| *c == saved_lang) {
+            saved_lang.to_string()
+        } else if !p.summary_lang.is_empty() {
+            p.summary_lang.clone()
+        } else {
+            p.out_lang().to_string()
+        };
+        let saved_model = self.settings.summary_model.trim();
+        let model = if !saved_model.is_empty() {
+            saved_model.to_string()
+        } else if !p.summary_model.is_empty() {
+            p.summary_model.clone()
+        } else {
+            self.settings.mt_model.trim().to_string()
+        };
+        let long = self.settings.summary_long || p.summary_long;
+        self.sum_model.update(cx, |s, cx| s.set_value(model.clone(), window, cx));
+        self.open_select = None;
+        let ready = self.settings.mt_ready();
+        self.dialog = Some(Dialog::Summarize {
+            lang,
+            model: model.clone(),
+            long,
+            models: vec![model],
+            custom: false,
+            looking: ready,
+            lookup_error: None,
+        });
+        if ready {
+            let cfg = self.settings.mt();
+            let tx = self.bg_tx.clone();
+            spawn("models", move || {
+                let result = mt::list_models(&cfg).map_err(|e| friendly(&e, &cfg.url));
+                let _ = tx.send(Bg::SummaryModels(result));
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn set_summary_length(&mut self, long: bool, cx: &mut Context<Self>) {
+        if let Some(Dialog::Summarize { long: slot, .. }) = &mut self.dialog {
+            *slot = long;
+        }
+        cx.notify();
+    }
+
+    pub fn summarize_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_endpoint("A summary", cx) {
+            return;
+        }
+        let Some(Dialog::Summarize { lang, model, long, custom, .. }) = &self.dialog else {
+            return;
+        };
+        let (lang, mut model, long, custom) = (lang.clone(), model.clone(), *long, *custom);
+        if custom {
+            model = self.sum_model.read(cx).value().trim().to_string();
+        }
+        if model.is_empty() {
+            self.toast("Name the model that should write the summary.", ToastKind::Warn, None, cx);
+            return;
+        }
+        self.settings.summary_lang = lang.clone();
+        self.settings.summary_model = model.clone();
+        self.settings.summary_long = long;
+        if let Err(e) = store::save_settings(&self.settings) {
+            eprintln!("saving settings: {e:#}");
+        }
+        self.close_dialog(window, cx);
+        self.start_summary(lang, model, long, cx);
+    }
+
+    fn start_summary(&mut self, lang: String, model: String, long: bool, cx: &mut Context<Self>) {
+        let Some(p) = self.current() else { return };
+        let transcript = p.transcript();
+        if transcript.trim().is_empty() {
+            self.toast("There is nothing to summarize yet.", ToastKind::Warn, None, cx);
+            return;
+        }
+        let pid = p.id.clone();
+        let lang_label = lang_name(&lang);
+        let terms: Vec<&Term> = active_glossary(&self.glossary, Some(&pid)).collect();
+        let rules = mt::glossary_rules(&terms);
+        let mut cfg = self.settings.mt();
+        cfg.model = model.clone();
+
+        if let Some(old) = self.summary_job.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        self.next_id += 1;
+        let job = self.next_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.summary_job = Some(SummaryJob {
+            id: job,
+            pid: pid.clone(),
+            lang: lang.clone(),
+            model: model.clone(),
+            long,
+            cancel: cancel.clone(),
+        });
+        let tx = self.bg_tx.clone();
+        spawn("summary", move || {
+            let result = mt::summarize(&cfg, &lang_label, long, &rules, &transcript, &cancel);
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let result = result.map_err(|e| friendly(&e, &cfg.url));
+            let _ = tx.send(Bg::Summary { pid, job, result });
+        });
+        cx.notify();
+    }
+
+    fn summary_models(&mut self, result: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        let Some(Dialog::Summarize { model, models, looking, lookup_error, .. }) = &mut self.dialog else {
+            return;
+        };
+        *looking = false;
+        match result {
+            Ok(mut list) => {
+                if !model.is_empty() && !list.iter().any(|m| m == model) {
+                    list.insert(0, model.clone());
+                }
+                *models = list;
+                *lookup_error = None;
+            }
+            Err(e) => *lookup_error = Some(e),
+        }
+        cx.notify();
+    }
+
+    fn summary_arrived(&mut self, pid: String, job: u64, result: Result<String, String>, cx: &mut Context<Self>) {
+        if self.summary_job.as_ref().is_none_or(|j| j.id != job) {
+            return;
+        }
+        let Some(job) = self.summary_job.take() else { return };
+        match result {
+            Ok(text) => {
+                let Some(p) = self.project_mut(&pid) else { return };
+                p.summary = text;
+                p.summary_lang = job.lang;
+                p.summary_model = job.model;
+                p.summary_long = job.long;
+                let name = p.name.clone();
+                self.save_now();
+                self.toast(format!("Summary written for “{name}”."), ToastKind::Ok, None, cx);
+            }
+            Err(e) => {
+                self.toast(
+                    format!("Could not write a summary: {e}."),
+                    ToastKind::Bad,
+                    Some(("Engines", ToastAction::Engines)),
+                    cx,
+                );
+            }
+        }
     }
 
     // ─── adding a translation later ────────────────────────

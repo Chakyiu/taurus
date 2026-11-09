@@ -48,7 +48,7 @@ impl Workbench {
             .iter()
             .filter(|p| {
                 q.is_empty()
-                    || format!("{} {} {}", p.name, p.source, lang_name(p.out_lang()))
+                    || format!("{} {} {} {}", p.name, p.source, lang_name(p.out_lang()), p.summary)
                         .to_lowercase()
                         .contains(&q)
             })

@@ -83,13 +83,75 @@ impl Workbench {
             self.line_list(bp, capturing, window, cx)
         };
 
+        let show_summary = self.summary_job.as_ref().is_some_and(|j| j.pid == pid)
+            || self.current().is_some_and(|p| !p.summary.trim().is_empty());
         let transport = self.audio_source(p).map(|_| self.transport(bp, cx));
         screen()
             .children(strip)
             .when(!p.segs.is_empty() && !capturing, |d| d.child(self.toolbar(bp, cx)))
+            .when(show_summary && !capturing, |d| d.child(self.summary_panel(bp, cx)))
             .child(body)
             .children(transport)
             .into_any_element()
+    }
+
+    fn summary_panel(&self, bp: Bp, cx: &mut Context<Self>) -> Div {
+        let Some(p) = self.current() else { return div() };
+        let writing = self.summary_job.as_ref().filter(|j| j.pid == p.id).map(|j| {
+            format!("Writing a summary in {} with {}…", lang_name(&j.lang), j.model)
+        });
+        let text = p.summary.trim().to_string();
+        let meta = summary_meta(p);
+        col()
+            .flex_none()
+            .mx(bp.pad_x())
+            .mt(px(4.))
+            .mb(px(4.))
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(t::R)
+            .bg(t::surface())
+            .border_1()
+            .border_color(t::line())
+            .gap(px(6.))
+            .child(
+                row()
+                    .gap(px(14.))
+                    .child(label("Summary"))
+                    .child(fill())
+                    .when(writing.is_none(), |d| {
+                        d.child(
+                            link_button("sum-again", "Summarize again")
+                                .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
+                        )
+                    })
+                    .when(!text.is_empty(), |d| {
+                        d.child(link_button("sum-copy", "Copy").on_click(cx.listener(|this, _, _, cx| {
+                            this.copy_summary(cx)
+                        })))
+                    }),
+            )
+            .when_some(meta, |d, m| {
+                d.child(div().text_size(t::T_SMALL).text_color(t::text_3()).child(m))
+            })
+            .child(
+                div()
+                    .id("summary-body")
+                    .w_full()
+                    .max_h(px(168.))
+                    .overflow_y_scroll()
+                    .text_size(px(15.))
+                    .line_height(relative(1.55))
+                    .text_color(if text.is_empty() { t::text_2() } else { t::text() })
+                    .child(if text.is_empty() {
+                        writing.clone().unwrap_or_else(|| "Writing a summary of these lines…".into())
+                    } else {
+                        text
+                    }),
+            )
+            .when(writing.is_some() && !p.summary.trim().is_empty(), |d| {
+                d.child(hint(writing.unwrap_or_default()))
+            })
     }
 
     fn toolbar(&self, bp: Bp, cx: &mut Context<Self>) -> Div {
@@ -120,6 +182,20 @@ impl Workbench {
                 )
             })
             .child(fill())
+            .when(
+                p.summary.trim().is_empty() && self.summary_job.as_ref().is_none_or(|j| j.pid != p.id),
+                |d| {
+                    d.child(
+                        button("ed-summarize", Btn::Quiet, Some(Icon::Summary), Some("Summarize"), false)
+                            .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
+                    )
+                },
+            )
+            .when(self.summary_job.as_ref().is_some_and(|j| j.pid == p.id), |d| {
+                d.child(
+                    button("ed-summarize", Btn::Quiet, Some(Icon::Summary), Some("Summarizing…"), true),
+                )
+            })
             .when(can_identify, |d| {
                 d.child(
                     button(
@@ -130,6 +206,12 @@ impl Workbench {
                         false,
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.identify_speakers(cx))),
+                )
+            })
+            .when(p.video_path.is_some() && p.status != Status::Live, |d| {
+                d.child(
+                    button("ed-video", Btn::Quiet, Some(Icon::Film), Some("Open video"), false)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_video(cx))),
                 )
             })
             .when(p.kind == Kind::Audio && p.source_path.is_some(), |d| {
@@ -629,6 +711,24 @@ impl Workbench {
             .whitespace_nowrap()
             .child(text.into())
     }
+}
+
+/// Language, model and length of the summary already written.
+fn summary_meta(p: &Project) -> Option<String> {
+    if p.summary.trim().is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !p.summary_lang.is_empty() {
+        parts.push(lang_name(&p.summary_lang));
+    }
+    if !p.summary_model.is_empty() {
+        parts.push(p.summary_model.clone());
+    }
+    if p.summary_long {
+        parts.push("a fuller account".into());
+    }
+    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
 }
 
 /// Each voice keeps one colour wherever it speaks.

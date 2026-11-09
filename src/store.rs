@@ -33,6 +33,10 @@ pub fn recording_path(project_id: &str) -> PathBuf {
     data_dir().join("recordings").join(format!("{project_id}.wav"))
 }
 
+pub fn video_path(project_id: &str) -> PathBuf {
+    data_dir().join("recordings").join(format!("{project_id}.mp4"))
+}
+
 /// Models are large and shared by every library.
 pub fn models_dir() -> PathBuf {
     let dir = app_dir().join("models");

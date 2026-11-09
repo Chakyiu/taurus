@@ -1,6 +1,7 @@
 //! Translation through any OpenAI-compatible `/chat/completions` endpoint:
 //! OpenAI, OpenRouter, vLLM, LM Studio or a local Ollama.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -150,6 +151,178 @@ fn parse_lines(content: &str, n: usize) -> Result<Vec<String>> {
     Ok(list.into_iter().map(|s| s.replace("\\n", "\n").trim().to_string()).collect())
 }
 
+/// How much of a transcript one request should carry. Longer transcripts are
+/// summarized in parts, then those parts are folded into one account.
+const CHUNK_CHARS: usize = 6_000;
+
+/// Model ids from an OpenAI-style `/models` reply, or Ollama's native list.
+pub fn parse_model_ids(body: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(arr) = v["data"].as_array().or_else(|| v["models"].as_array()) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for item in arr {
+        let id = item["id"]
+            .as_str()
+            .or_else(|| item["name"].as_str())
+            .or_else(|| item["model"].as_str())
+            .unwrap_or("")
+            .trim();
+        if !id.is_empty() && !ids.iter().any(|e: &String| e == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// Asks the endpoint which chat models it has.
+pub fn list_models(cfg: &MtConfig) -> Result<Vec<String>> {
+    let mut req = agent(Duration::from_secs(8)).get(format!("{}/models", cfg.url));
+    if !cfg.key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.key));
+    }
+    let resp = req.call().with_context(|| format!("contacting {}", cfg.url))?;
+    let mut resp = check(resp)?;
+    let body = resp.body_mut().read_to_string().context("reading the model list")?;
+    let ids = parse_model_ids(&body);
+    if ids.is_empty() {
+        bail!("the endpoint did not list any models");
+    }
+    Ok(ids)
+}
+
+/// A prose account of a transcript, written in `lang` (a language name).
+/// `long` asks for a few paragraphs instead of a few sentences.
+pub fn summarize(
+    cfg: &MtConfig,
+    lang: &str,
+    long: bool,
+    rules: &[String],
+    transcript: &str,
+    cancel: &AtomicBool,
+) -> Result<String> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        bail!("nothing to summarize");
+    }
+    let parts = split_transcript(transcript, CHUNK_CHARS);
+    if parts.len() <= 1 {
+        return one_summary(cfg, lang, long, rules, transcript, None, cancel);
+    }
+    let mut partials = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            bail!("cancelled");
+        }
+        let note = format!(
+            "This is part {} of {} of one transcript. Summarize only this part.",
+            i + 1,
+            parts.len()
+        );
+        partials.push(one_summary(cfg, lang, long, rules, part, Some(&note), cancel)?);
+    }
+    let fold = if long {
+        "These are summaries of consecutive parts of one transcript. Combine them into one fuller account, without repeating yourself."
+    } else {
+        "These are summaries of consecutive parts of one transcript. Combine them into one short summary, without repeating yourself."
+    };
+    one_summary(cfg, lang, long, rules, &partials.join("\n\n"), Some(fold), cancel)
+}
+
+fn one_summary(
+    cfg: &MtConfig,
+    lang: &str,
+    long: bool,
+    rules: &[String],
+    text: &str,
+    note: Option<&str>,
+    cancel: &AtomicBool,
+) -> Result<String> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
+    let shape = if long {
+        "Several paragraphs of plain prose: what happens, who is involved, and the points that matter, in the order they come up."
+    } else {
+        "A few sentences of plain prose: what happens, who is involved, and the points that matter."
+    };
+    let mut system = format!(
+        "You summarize a spoken transcript for someone who has not heard it.\n\
+         Write in {lang}.\n\
+         - {shape}\n\
+         - Use only what the transcript says. Do not invent scenes, names or motives.\n\
+         - No title, headings, bullets or preamble. Reply with the summary only."
+    );
+    if let Some(note) = note {
+        system.push('\n');
+        system.push_str(note);
+    }
+    if !rules.is_empty() {
+        system.push_str("\nWhen you name things, follow these:\n");
+        for r in rules {
+            system.push_str("- ");
+            system.push_str(r);
+            system.push('\n');
+        }
+    }
+    let body = json!({
+        "model": cfg.model,
+        "temperature": 0.3,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": text },
+        ],
+    });
+    let content = chat(cfg, &body)?;
+    let prose = plain_prose(&content);
+    if prose.is_empty() {
+        bail!("the reply was empty");
+    }
+    Ok(prose)
+}
+
+fn plain_prose(s: &str) -> String {
+    let mut s = s.trim();
+    if let Some(rest) = s.strip_prefix("```") {
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric());
+        s = rest.trim().trim_end_matches("```").trim();
+    }
+    for prefix in ["Summary:", "Summary：", "摘要:", "摘要："] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim();
+            break;
+        }
+    }
+    s.to_string()
+}
+
+/// Splits on line breaks so each piece stays near `max_chars`.
+fn split_transcript(text: &str, max_chars: usize) -> Vec<String> {
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut n = 0usize;
+    for line in text.split_inclusive('\n') {
+        let len = line.chars().count();
+        if n > 0 && n + len > max_chars {
+            out.push(std::mem::take(&mut buf));
+            n = 0;
+        }
+        buf.push_str(line);
+        n += len;
+    }
+    if !buf.trim().is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
 /// A one-line round trip, so the settings dialog can prove the endpoint works.
 pub fn test(cfg: &MtConfig, to: &str) -> Result<String> {
     let out = translate(cfg, "en", to, &[], &[], &["Good evening, and welcome back.".to_string()])?;
@@ -169,5 +342,20 @@ mod tests {
         );
         assert!(parse_lines("{\"t\": [\"a\"]}", 2).is_err());
         assert_eq!(strip_thinking("<think>a</think> ok"), "ok");
+        assert_eq!(plain_prose("```markdown\nSummary: Hello.\n```"), "Hello.");
+        assert_eq!(plain_prose("摘要：晚饭谈完了。"), "晚饭谈完了。");
+        let long = "one\n".repeat(20);
+        let parts = split_transcript(&long, 12);
+        assert!(parts.len() > 1);
+        assert_eq!(parts.join(""), long);
+        assert!(split_transcript("short", 100).len() == 1);
+        assert_eq!(
+            parse_model_ids(r#"{"data":[{"id":"qwen3:8b"},{"id":"llama3"},{"id":"qwen3:8b"}]}"#),
+            vec!["llama3", "qwen3:8b"]
+        );
+        assert_eq!(
+            parse_model_ids(r#"{"models":[{"name":"mistral"}]}"#),
+            vec!["mistral"]
+        );
     }
 }

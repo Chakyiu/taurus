@@ -267,3 +267,36 @@ fn e2e_tells_two_voices_apart() {
     println!("{labels:?} in {:?}", t.elapsed());
     assert_eq!(labels, vec![0, 1, 0, 1]);
 }
+
+/// Records the whole screen (or `TAURUS_SCREEN_APP`) with sound for a few
+/// seconds; the movie should come out playable, with video and audio tracks.
+#[test]
+#[ignore]
+fn e2e_records_the_screen() {
+    use crate::capture;
+    if !capture::can_record_screen() {
+        println!("needs macOS 15; skipping");
+        return;
+    }
+    let path = fixture_dir().join("screen.mp4");
+    let target = std::env::var("TAURUS_SCREEN_APP").unwrap_or_else(|_| capture::WHOLE_SCREEN.into());
+    let quality = std::env::var("TAURUS_SCREEN_QUALITY")
+        .ok()
+        .and_then(|k| capture::VideoQuality::from_key(&k))
+        .unwrap_or(capture::VideoQuality::Standard);
+    let secs = std::env::var("TAURUS_SCREEN_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let rec = capture::record_screen(&target, quality, true, false, &path).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    drop(rec);
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration", "-of", "compact"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&out.stdout).to_string();
+    println!("{info}{} bytes", std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
+    assert!(info.contains("codec_type=video"), "{info}");
+    assert!(info.contains("codec_type=audio"), "{info}");
+    let secs: f64 = info.split("duration=").nth(1).and_then(|d| d.trim().parse().ok()).unwrap_or(0.0);
+    assert!(secs > 2.5, "{secs} s");
+}

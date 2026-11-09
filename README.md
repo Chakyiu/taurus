@@ -12,11 +12,12 @@
 
 ## What it does
 
-- **Live caption.** Captions the sound coming out of your Mac, or a microphone, as it plays. Taurus records the audio into the project, so you can play it back or work on it later.
+- **Live caption.** Captions what you hear as it plays: your Mac's sound and your microphone together (the default, good for both sides of a call), or either one alone. Taurus records the audio into the project, so you can play it back or work on it later. On macOS 15 and later it can also record the screen, either the whole display or just one app's windows, as an `.mp4` kept with the project on the same clock as the captions. Movies are HEVC (H.265), at Small (720p, 15 fps), Standard (1080p, the default) or Full (the display's own resolution). Save a setup you use often (what to listen to, which microphone, what to record and at what quality) as a named profile. The dialog always opens with the choices of your last capture.
 - **From a video.** Reads a video's subtitle track, or transcribes its audio when it has none. Long cues are retimed and split.
 - **Import subtitles.** Drop in `.srt`, `.vtt`, `.ass` or `.ssa` files.
 - **Speaker identification.** Works out who said each line and labels it Speaker 1, Speaker 2 and so on. Click a name to rename that speaker everywhere.
 - **Translation, if you want it.** Off by default. Turn it on when you start a capture or a video, or add it to any project later. It works with any OpenAI-compatible endpoint, such as a local Ollama, and follows your glossary.
+- **Summary.** A short account of the lines, through the translation endpoint. You choose the language, the model and whether it is a few sentences or a fuller account. It stays with the project.
 - **Review.** Each line is checked against reading speed (17 characters per second), line length (42 characters) and the gap to the next line. "Only lines to check" shows just the lines that need work. Click any text to edit it.
 - **Playback.** Play the project's audio, click a timestamp to jump to it, and the list follows along. Space plays and pauses.
 - **Glossary.** Terms you prefer, keep untranslated, or never want to see. Each one applies to every project or to just one.
@@ -72,7 +73,8 @@ The first live caption asks for **Screen & System Audio Recording** permission, 
 2. Click **New** and choose **Live caption**, **From a video** or **Import subtitles**.
 3. Optionally turn on **Translate the lines** and choose a language. To translate a project later, use **Translate** in its toolbar.
 4. To label speakers, click **Identify speakers** in a project that has audio.
-5. Click **Export** when the lines read well.
+5. Click **Summarize** in a project's toolbar and choose the language, the model and the length. The account is saved with the project.
+6. Click **Export** when the lines read well.
 
 ## Where your data lives
 

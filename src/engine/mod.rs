@@ -43,6 +43,32 @@ pub struct Settings {
     pub mt_key: String,
     /// Whether new projects are translated; the switch remembers its last use.
     pub translate: bool,
+    /// Language code for summaries. Empty means the project's reading language.
+    pub summary_lang: String,
+    /// Chat model for summaries. Empty means the translation model.
+    pub summary_model: String,
+    /// A longer summary instead of a few sentences.
+    pub summary_long: bool,
+    /// Named capture setups, offered at the top of the live caption dialog.
+    pub profiles: Vec<CaptureProfile>,
+    /// The profile picked last. Empty for none.
+    pub profile: String,
+    /// The choices of the last capture started, which the dialog opens with.
+    pub last_capture: Option<CaptureProfile>,
+}
+
+/// What to listen to and record, saved under a name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureProfile {
+    pub name: String,
+    /// `both`, `system` or `mic`.
+    pub source: String,
+    pub sound_from: String,
+    pub microphone: String,
+    pub screen: String,
+    /// A `capture::VideoQuality` key.
+    pub quality: String,
 }
 
 impl Default for Settings {
@@ -58,6 +84,12 @@ impl Default for Settings {
             mt_model: "qwen3:8b".into(),
             mt_key: String::new(),
             translate: false,
+            summary_lang: String::new(),
+            summary_model: String::new(),
+            summary_long: false,
+            profiles: Vec::new(),
+            profile: String::new(),
+            last_capture: None,
         }
     }
 }

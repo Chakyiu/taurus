@@ -36,6 +36,7 @@ pub enum Icon {
     Arc,
     Users,
     Translate,
+    Summary,
 }
 
 const ALL: &[Icon] = &[
@@ -68,6 +69,7 @@ const ALL: &[Icon] = &[
     Icon::Arc,
     Icon::Users,
     Icon::Translate,
+    Icon::Summary,
 ];
 
 impl Icon {
@@ -85,6 +87,7 @@ impl Icon {
             Icon::Mic => "mic",
             Icon::Users => "users",
             Icon::Translate => "translate",
+            Icon::Summary => "summary",
             Icon::Monitor => "monitor",
             Icon::Crop => "crop",
             Icon::Swap => "swap",
@@ -132,6 +135,7 @@ impl Icon {
                 "M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6M16 4.3a3.5 3.5 0 0 1 0 6.4M18 14.4c2.1.7 3.5 2.8 3.5 5.6"
             }
             Icon::Translate => "M4 5h9M8.5 3v2M6 5c1 3.5 3.5 6 6.5 7.5M11 5c-1 4-3.5 7.5-7 9.5M12.5 20.5l4-10 4 10M14 17h5",
+            Icon::Summary => "M6.5 3.5h7.2L18 8v12.5H6.5zM13.5 3.8V8H18M9 12h6M9 15.2h6M9 18.4h3.6",
             Icon::Crop => "M7.5 3v4.5H3M16.5 21v-4.5H21M3 16.5h4.5V21M21 7.5h-4.5V3",
             Icon::Swap => {
                 "M7 6.5h12m0 0-3.2-3.2M19 6.5l-3.2 3.2M17 17.5H5m0 0 3.2-3.2M5 17.5l3.2 3.2"

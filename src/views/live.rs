@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Div, HighlightStyle, IntoElement, ParentElement, SharedString,
+    AnyElement, Context, Div, Window, HighlightStyle, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, StyledText, UnderlineStyle, div, px, relative,
 };
 
@@ -133,12 +133,16 @@ impl Workbench {
                     .text_ellipsis()
                     .when(!bp.mobile(), |d| d.child(note)),
             )
-            .child(if running {
+            .child(if running && self.live.session.as_ref().is_some_and(|s| s.records_video()) {
+                div().into_any_element()
+            } else if running {
                 button("live-pause", Btn::Quiet, Some(Icon::Pause), Some("Pause"), false)
                     .on_click(cx.listener(|this, _, _, cx| this.pause_live(cx)))
+                    .into_any_element()
             } else {
                 button("live-resume", Btn::Quiet, Some(Icon::Play), Some("Resume"), false)
                     .on_click(cx.listener(|this, _, w, cx| this.start_live(w, cx)))
+                    .into_any_element()
             })
             .child(
                 button("live-stop", Btn::Ghost, Some(Icon::Stop), Some("Stop"), false)
@@ -178,24 +182,127 @@ impl Workbench {
             )
     }
 
-    pub(crate) fn capture_body(&self, cx: &mut Context<Self>) -> Div {
+    /// Pick, save, update or delete a named capture setup.
+    fn profile_row(&self, idle: bool, window: &Window, cx: &mut Context<Self>) -> Div {
+        if let Some(err) = &self.naming_profile {
+            return col()
+                .gap(px(6.))
+                .child(
+                    row()
+                        .items_end()
+                        .gap(px(8.))
+                        .child(div().flex_1().min_w_0().child(field(
+                            "Profile name",
+                            self.text_field(&self.profile_input, None, err.is_some(), window, cx),
+                        )))
+                        .child(
+                            button("prof-cancel", Btn::Ghost, None, Some("Cancel"), false)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_profile_name(cx))),
+                        )
+                        .child(
+                            button("prof-save", Btn::Primary, None, Some("Save profile"), false)
+                                .on_click(cx.listener(|this, _, w, cx| this.save_profile(w, cx))),
+                        ),
+                )
+                .when_some(err.clone(), |d, e| d.child(err_text(e)));
+        }
+        let picked = self.profile(&self.settings.profile).is_some();
+        row()
+            .items_end()
+            .gap(px(8.))
+            .child(div().flex_1().min_w_0().child(field(
+                "Profile",
+                self.render_select(Sel::Profile, px(0.), !idle || self.settings.profiles.is_empty(), cx),
+            )))
+            .when(picked && self.profile_changed(), |d| {
+                d.child(
+                    button("prof-update", Btn::Ghost, None, Some("Update"), !idle)
+                        .when(idle, |d| d.on_click(cx.listener(|this, _, _, cx| this.update_profile(cx)))),
+                )
+            })
+            .child(
+                button("prof-new", Btn::Ghost, Some(Icon::Plus), Some("Save as…"), !idle)
+                    .when(idle, |d| d.on_click(cx.listener(|this, _, w, cx| this.begin_profile_name(w, cx)))),
+            )
+            .when(picked, |d| {
+                d.child(
+                    button("prof-del", Btn::Icon, Some(Icon::Trash), None, !idle)
+                        .when(idle, |d| d.on_click(cx.listener(|this, _, _, cx| this.delete_profile(cx)))),
+                )
+            })
+    }
+
+    pub(crate) fn capture_body(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let idle = self.live.status == LiveStatus::Idle;
-        let sources = segmented().children([Source::System, Source::Mic].map(|s| {
-            let ic = if s == Source::Mic { Icon::Mic } else { Icon::Monitor };
+        let sources = segmented().children([Source::Both, Source::System, Source::Mic].map(|s| {
+            let (ic, text) = match s {
+                Source::Both => (Icon::Waveform, "Both"),
+                Source::Mic => (Icon::Mic, "Microphone"),
+                _ => (Icon::Monitor, "This Mac"),
+            };
             seg_button(
                 SharedString::from(format!("src-{s:?}")),
                 Some(ic),
-                s.label(),
+                text,
                 self.live.source == s,
                 !idle,
             )
             .on_click(cx.listener(move |this, _, _, cx| this.set_source(s, cx)))
         }));
-        let device = if self.live.source == Source::Mic { "Microphone" } else { "Sound from" };
+        let source = self.live.source;
+        let hears_mac = source != Source::Mic;
+        let hears_mic = source != Source::System;
         col()
             .gap(px(16.))
-            .child(field("Listen to", sources))
-            .child(field(device, self.render_select(Sel::SourceDetail, px(200.), !idle, cx)))
+            .child(self.profile_row(idle, window, cx))
+            .child(
+                field("Listen to", sources).when(source == Source::Both, |d| {
+                    d.child(hint("Use headphones, or the microphone hears the speakers too and lines repeat."))
+                }),
+            )
+            .child(
+                row()
+                    .gap(px(8.))
+                    .when(hears_mac, |d| {
+                        d.child(div().flex_1().min_w_0().child(field(
+                            "Sound from",
+                            self.render_select(Sel::SourceDetail, px(0.), !idle, cx),
+                        )))
+                    })
+                    .when(hears_mic, |d| {
+                        d.child(div().flex_1().min_w_0().child(field(
+                            "Microphone",
+                            self.render_select(Sel::MicDetail, px(0.), !idle, cx),
+                        )))
+                    }),
+            )
+            .when(self.live.can_video, |d| {
+                let recording = self.live.video != crate::capture::NO_VIDEO;
+                d.child(
+                    col()
+                        .gap(px(6.))
+                        .child(
+                            row()
+                                .gap(px(8.))
+                                .child(div().flex_1().min_w_0().child(field(
+                                    "Record the screen",
+                                    self.render_select(Sel::VideoDetail, px(0.), !idle, cx),
+                                )))
+                                .when(recording, |d| {
+                                    d.child(div().flex_1().min_w_0().child(field(
+                                        "Quality",
+                                        self.render_select(Sel::VideoQuality, px(0.), !idle, cx),
+                                    )))
+                                }),
+                        )
+                        .when(recording, |d| {
+                            d.child(hint(format!(
+                                "{} Saved as a movie with the project. Captions follow its clock, so this capture can't pause.",
+                                self.live.video_quality.hint()
+                            )))
+                        }),
+                )
+            })
             .child(self.lang_pair(Sel::LiveFrom, Sel::LiveTo, !idle, cx))
             .when(!self.settings.asr_ready(), |d| {
                 d.child(

@@ -26,6 +26,8 @@ pub fn lang_name(code: &str) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
+    /// This Mac's output and a microphone, mixed.
+    Both,
     System,
     Mic,
     Screen,
@@ -34,10 +36,24 @@ pub enum Source {
 impl Source {
     pub fn label(self) -> &'static str {
         match self {
+            Source::Both => "This Mac and microphone",
             Source::System => "This Mac",
             Source::Mic => "Microphone",
             Source::Screen => "Screen region",
         }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Source::Both => "both",
+            Source::System => "system",
+            Source::Mic => "mic",
+            Source::Screen => "screen",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Source> {
+        [Source::Both, Source::System, Source::Mic].into_iter().find(|s| s.key() == key)
     }
 }
 
@@ -387,6 +403,9 @@ pub struct Project {
     /// The file on disk the project was read from, when there is one.
     #[serde(default)]
     pub source_path: Option<String>,
+    /// A screen recording made alongside a live caption.
+    #[serde(default)]
+    pub video_path: Option<String>,
     pub status: Status,
     pub from: String,
     pub to: String,
@@ -400,6 +419,18 @@ pub struct Project {
     /// Names given to identified speakers; empty means "Speaker n".
     #[serde(default)]
     pub speakers: Vec<String>,
+    /// A short account of the lines, written through the translation endpoint.
+    #[serde(default)]
+    pub summary: String,
+    /// Language the summary was written in, as a language code.
+    #[serde(default)]
+    pub summary_lang: String,
+    /// Model that wrote the summary.
+    #[serde(default)]
+    pub summary_model: String,
+    /// The summary was asked for as a fuller account.
+    #[serde(default)]
+    pub summary_long: bool,
 }
 
 fn yes() -> bool {
@@ -480,6 +511,7 @@ impl Project {
             created_ms: now_ms(),
             source,
             source_path,
+            video_path: None,
             status,
             from: from.into(),
             to: to.into(),
@@ -489,7 +521,29 @@ impl Project {
             exports: Vec::new(),
             translate: true,
             speakers: Vec::new(),
+            summary: String::new(),
+            summary_lang: String::new(),
+            summary_model: String::new(),
+            summary_long: false,
         }
+    }
+
+    /// The spoken lines, labelled by speaker when voices have been named,
+    /// for a summary to read.
+    pub fn transcript(&self) -> String {
+        let mut lines = Vec::new();
+        for s in &self.segs {
+            let text = s.orig.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let line = match s.speaker {
+                Some(n) => format!("{}: {text}", self.speaker_name(n)),
+                None => text.to_string(),
+            };
+            lines.push(line);
+        }
+        lines.join("\n")
     }
 
     /// The language lines are checked and exported in.
@@ -1263,6 +1317,29 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_skips_blanks_and_names_speakers() {
+        let mut p = Project::new(
+            "t".into(),
+            Kind::Subtitle,
+            "talk".into(),
+            "talk.srt".into(),
+            None,
+            Status::Review,
+            "en",
+            "zh",
+            vec![
+                Segment::new(0, 1000, "Hello.", ""),
+                Segment::new(1000, 2000, "  ", ""),
+                Segment::new(2000, 3000, "Over here.", ""),
+            ],
+        );
+        p.segs[0].speaker = Some(0);
+        p.segs[2].speaker = Some(1);
+        p.speakers = vec!["Ada".into()];
+        assert_eq!(p.transcript(), "Ada: Hello.\nSpeaker 2: Over here.");
+    }
 
     #[test]
     fn night_market_has_five_open_cues() {

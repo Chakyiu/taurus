@@ -34,9 +34,25 @@ pub struct LiveSession {
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     _capture: Capture,
+    video: Option<capture::ScreenRecording>,
+}
+
+/// A movie of the screen to make alongside the captions.
+pub struct VideoPlan {
+    /// `capture::WHOLE_SCREEN` or an app name.
+    pub target: String,
+    pub quality: capture::VideoQuality,
+    pub system_audio: bool,
+    pub microphone: bool,
+    pub path: PathBuf,
 }
 
 impl LiveSession {
+    /// The movie cannot skip paused stretches, so a session with one never pauses.
+    pub fn records_video(&self) -> bool {
+        self.video.is_some()
+    }
+
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
     }
@@ -56,6 +72,7 @@ pub fn start(
     lang: String,
     offset_ms: i64,
     record: &Path,
+    video: Option<VideoPlan>,
 ) -> Result<LiveSession> {
     let recording = Recording::create(record)?;
     let (audio_tx, audio_rx) = channel::<Vec<f32>>();
@@ -66,6 +83,19 @@ pub fn start(
             let _ = std::fs::remove_file(record);
             return Err(e);
         }
+    };
+    let video = match video {
+        Some(v) => match capture::record_screen(&v.target, v.quality, v.system_audio, v.microphone, &v.path) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                drop(capture);
+                drop(recording);
+                let _ = std::fs::remove_file(record);
+                let _ = std::fs::remove_file(&v.path);
+                return Err(e);
+            }
+        },
+        None => None,
     };
     let (tx, events) = channel();
     let paused = Arc::new(AtomicBool::new(false));
@@ -91,6 +121,7 @@ pub fn start(
         paused,
         stop,
         _capture: capture,
+        video,
     })
 }
 

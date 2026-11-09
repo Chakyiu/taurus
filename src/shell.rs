@@ -336,7 +336,7 @@ impl Workbench {
             .iter()
             .find(|(k, _)| *k == value)
             .map(|(_, l)| l.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| value.clone());
         let open = self.open_select == Some(sel) && !disabled;
         let id = SharedString::from(format!("sel-{sel:?}"));
 
@@ -462,6 +462,7 @@ impl Workbench {
             Dialog::Term { .. } => 520.,
             Dialog::Capture | Dialog::Extract | Dialog::Export => 480.,
             Dialog::Confirm { .. } | Dialog::Rename { .. } | Dialog::Translate => 400.,
+            Dialog::Summarize { .. } => 440.,
         };
         let max_w = px(f32::min(width, bp.w - 32.));
         let mut extra: Option<AnyElement> = None;
@@ -570,12 +571,85 @@ impl Workbench {
                         .on_click(cx.listener(|this, _, w, cx| this.translate_now(w, cx))),
                 )
             }
+            Dialog::Summarize {
+                long,
+                custom,
+                looking,
+                lookup_error,
+                ..
+            } => {
+                let endpoint = self.settings.mt_url.trim().trim_end_matches('/').to_string();
+                let ready = self.settings.mt_ready();
+                let named = !self.sum_model.read(cx).value().trim().is_empty();
+                let blocked = !ready || (*custom && !named);
+                let long = *long;
+                (
+                    row()
+                        .gap(px(10.))
+                        .child(title_el("Summarize".into()))
+                        .child(close_btn(cx)),
+                    col()
+                        .gap(px(16.))
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .text_color(t::text_2())
+                                .line_height(relative(1.6))
+                                .child("An account of these lines. Choose the language, the model and how long it should be."),
+                        )
+                        .child(field("Language", self.render_select(Sel::SumLang, px(220.), false, cx)))
+                        .child(field("Model", self.render_select(Sel::SumModel, px(220.), false, cx)))
+                        .when(*custom, |d| {
+                            d.child(field(
+                                "Model name",
+                                self.text_field(&self.sum_model, None, false, window, cx),
+                            ))
+                        })
+                        .when(*looking, |d| {
+                            d.child(hint("Looking up models on this endpoint…"))
+                        })
+                        .when_some(lookup_error.clone(), |d, e| {
+                            d.child(hint(format!("Could not list models ({e}). You can still use the model above, or type another.")))
+                        })
+                        .child(field(
+                            "Length",
+                            segmented()
+                                .child(
+                                    seg_button("sum-short", None, "A few sentences", !long, false)
+                                        .on_click(cx.listener(|this, _, _, cx| this.set_summary_length(false, cx))),
+                                )
+                                .child(
+                                    seg_button("sum-long", None, "A fuller account", long, false).on_click(
+                                        cx.listener(|this, _, _, cx| this.set_summary_length(true, cx)),
+                                    ),
+                                ),
+                        ))
+                        .child(hint(format!("Sent to {endpoint}. The endpoint and its key are set in Engines.")))
+                        .when(!ready, |d| {
+                            d.child(
+                                row()
+                                    .flex_wrap()
+                                    .text_size(t::T_SMALL)
+                                    .text_color(t::warn_text())
+                                    .child("The endpoint is not set up yet.\u{00A0}")
+                                    .child(
+                                        link_button("sum-engines", "Set up engines")
+                                            .on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx))),
+                                    ),
+                            )
+                        }),
+                    button("dlg-ok", Btn::Primary, Some(Icon::Summary), Some("Summarize"), blocked)
+                        .when(!blocked, |d| {
+                            d.on_click(cx.listener(|this, _, w, cx| this.summarize_now(w, cx)))
+                        }),
+                )
+            }
             Dialog::Capture => (
                 row()
                     .gap(px(10.))
                     .child(title_el("Live caption".into()))
                     .child(close_btn(cx)),
-                self.capture_body(cx),
+                self.capture_body(window, cx),
                 {
                     let busy = self.live.starting;
                     button(
