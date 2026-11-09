@@ -43,28 +43,28 @@ impl Workbench {
                 .child(self.text_field(&self.gl_search, Some(Icon::Search), false, window, cx))
         });
 
-        screen()
+        let list = div()
+            .id("gl-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.glossary_scroll)
+            .px(bp.pad_x())
+            .pt(px(16.))
+            .pb(px(32.))
             .child(
-                div()
-                    .id("gl-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(bp.pad_x())
-                    .pt(px(16.))
-                    .pb(px(32.))
-                    .child(
-                        col()
-                            .w_full()
-                            .max_w(px(960.))
-                            .mx_auto()
-                            .children(search)
-                            .children(rows)
-                            .when(none_match, |d| {
-                                d.child(hint("Nothing matches that search.").py(px(20.)))
-                            }),
-                    ),
-            )
+                col()
+                    .w_full()
+                    .max_w(px(960.))
+                    .mx_auto()
+                    .children(search)
+                    .children(rows)
+                    .when(none_match, |d| {
+                        d.child(hint("Nothing matches that search.").py(px(20.)))
+                    }),
+            );
+        screen()
+            .child(with_scroll_bar("gl-frame", list, &self.glossary_scroll).flex_1().min_h_0())
             .into_any_element()
     }
 

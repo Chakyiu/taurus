@@ -6,9 +6,10 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, CursorStyle, Div, ElementId, Hsla,
-    InteractiveElement, IntoElement, ParentElement, SharedString, Stateful, Styled, div, px,
-    relative,
+    InteractiveElement, IntoElement, ParentElement, ScrollHandle, SharedString, Stateful, Styled,
+    div, px, relative,
 };
+use gpui_component::scroll::ScrollableElement as _;
 
 use crate::icons::{Icon, icon};
 use crate::theme::{self as t, weight};
@@ -414,6 +415,15 @@ pub fn radio_sub(text: &str) -> Div {
         .text_color(t::text_2())
         .line_height(relative(1.5))
         .child(text.to_string())
+}
+
+// ─── scrolling ─────────────────────────────────────────────
+
+/// Lays the scroll bar over the right edge of `area`, which scrolls and
+/// tracks `handle`; the bar shows only when there is more to see. The column
+/// returned stands in for `area` in the layout, so size it as `area` was.
+pub fn with_scroll_bar(id: impl Into<ElementId>, area: impl IntoElement, handle: &ScrollHandle) -> Stateful<Div> {
+    col().id(id).relative().child(area).vertical_scrollbar(handle)
 }
 
 // ─── text blocks ───────────────────────────────────────────

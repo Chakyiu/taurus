@@ -457,6 +457,10 @@ pub struct Workbench {
     pub sum_model: Entity<InputState>,
     pub eng: EngineInputs,
     pub lines_scroll: ScrollHandle,
+    pub summary_scroll: ScrollHandle,
+    pub projects_scroll: ScrollHandle,
+    pub glossary_scroll: ScrollHandle,
+    pub dialog_scroll: ScrollHandle,
     _subs: Vec<Subscription>,
 }
 
@@ -722,6 +726,10 @@ impl Workbench {
             sum_model,
             eng,
             lines_scroll: ScrollHandle::new(),
+            summary_scroll: ScrollHandle::new(),
+            projects_scroll: ScrollHandle::new(),
+            glossary_scroll: ScrollHandle::new(),
+            dialog_scroll: ScrollHandle::new(),
             _subs: subs,
         };
         if let Some(p) = this.settings.last_capture.clone().or_else(|| this.profile(&this.settings.profile).cloned()) {

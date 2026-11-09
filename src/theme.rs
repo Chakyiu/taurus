@@ -73,9 +73,10 @@ pub fn weight(w: f32) -> FontWeight {
     FontWeight(w)
 }
 
-/// Point the gpui-component text inputs at the same tokens so editable
-/// fields read as part of this surface rather than a stock theme.
+/// Point the gpui-component text inputs and scroll bars at the same tokens so
+/// they read as part of this surface rather than a stock theme.
 pub fn apply_component_theme(cx: &mut App) {
+    use gpui_component::scroll::ScrollbarShow;
     use gpui_component::theme::{Theme, ThemeMode};
     Theme::change(ThemeMode::Dark, None, cx);
     let theme = Theme::global_mut(cx);
@@ -84,6 +85,9 @@ pub fn apply_component_theme(cx: &mut App) {
     theme.radius = R;
     theme.radius_lg = R_LG;
     theme.shadow = false;
+    // The design keeps scroll bars in view rather than following macOS's
+    // show-while-scrolling setting.
+    theme.scrollbar_show = ScrollbarShow::Always;
     let c = &mut theme.colors;
     c.background = surface();
     c.foreground = text();

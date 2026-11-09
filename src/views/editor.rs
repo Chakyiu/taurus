@@ -145,12 +145,15 @@ impl Workbench {
             .when_some(meta, |d, m| {
                 d.child(div().text_size(t::T_SMALL).text_color(t::text_3()).child(m))
             })
-            .child(
+            .child(with_scroll_bar(
+                "summary-frame",
                 div()
                     .id("summary-body")
                     .w_full()
                     .max_h(px(168.))
+                    .pr(px(16.))
                     .overflow_y_scroll()
+                    .track_scroll(&self.summary_scroll)
                     .text_size(px(15.))
                     .line_height(relative(1.55))
                     .text_color(if text.is_empty() { t::text_2() } else { t::text() })
@@ -159,7 +162,8 @@ impl Workbench {
                     } else {
                         text
                     }),
-            )
+                &self.summary_scroll,
+            ))
             .when(writing.is_some() && !p.summary.trim().is_empty(), |d| {
                 d.child(hint(writing.unwrap_or_default()))
             })
@@ -259,7 +263,7 @@ impl Workbench {
         let focused = self.seg_input.read(cx).focus_handle(cx).is_focused(window);
         let translating = p.status == Status::Working || capturing;
         let playing = self.playing_line();
-        div()
+        let list = div()
             .id("lines")
             .flex_1()
             .min_h_0()
@@ -273,7 +277,10 @@ impl Workbench {
             .children(capturing.then(|| self.heard_line(bp)).flatten())
             .when(none_left, |d| {
                 d.child(hint("Every line reads well now.").px(bp.pad_x()).py(px(20.)))
-            })
+            });
+        with_scroll_bar("lines-frame", list, &self.lines_scroll)
+            .flex_1()
+            .min_h_0()
             .into_any_element()
     }
 

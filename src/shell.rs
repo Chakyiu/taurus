@@ -786,12 +786,18 @@ impl Workbench {
             }])
             .child(head.px(px(20.)).pt(px(16.)).pb(px(4.)))
             .child(
-                div()
-                    .id("dlg-body")
-                    .px(px(20.))
-                    .py(px(12.))
-                    .overflow_y_scroll()
-                    .child(body),
+                with_scroll_bar(
+                    "dlg-frame",
+                    div()
+                        .id("dlg-body")
+                        .px(px(20.))
+                        .py(px(12.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.dialog_scroll)
+                        .child(body),
+                    &self.dialog_scroll,
+                )
+                .min_h_0(),
             )
             .child(
                 row()
