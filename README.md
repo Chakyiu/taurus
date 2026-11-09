@@ -22,6 +22,7 @@
 - **Playback.** Play the project's audio, click a timestamp to jump to it, and the list follows along. Space plays and pauses.
 - **Glossary.** Terms you prefer, keep untranslated, or never want to see. Each one applies to every project or to just one.
 - **Export.** SRT, VTT, ASS or plain text. You can include the original, the translation or both, with optional speaker names, line wrapping and merging.
+- **Updates.** Taurus looks for a new release once a day, downloads it in the background, checks it against its published checksum and puts it in place; **Restart to update** in the top bar starts the new version. **About** shows the version, checks on demand, and turns automatic updates off.
 
 <p align="center">
   <img src="docs/speakers.png" width="820" alt="Lines labelled by speaker">
@@ -65,6 +66,8 @@ This also writes a disk image, `target/release/bundle/dmg/Taurus.dmg`.
 
 On GitHub, every push and pull request is built and tested (`.github/workflows/ci.yml`). Releases are versioned by tag (`.github/workflows/release.yml`). Push a tag such as `v0.2.0` (`git tag v0.2.0 && git push origin v0.2.0`), or run **Release** from the Actions tab and type `0.2.0`. Either way, the app is built as version 0.2.0 and published on the Releases page as a `.dmg`, a `.zip` and their SHA-256 checksums. Tags with a suffix, like `v0.2.0-beta.1`, are marked as pre-releases. The app is signed ad hoc but not notarised, so on first launch, right-click it and choose **Open**.
 
+Copies built by the release workflow update themselves from the latest release that isn't a pre-release, as long as they can write to the folder they run from; move Taurus to Applications rather than running it from the disk image. A copy you build yourself never updates on its own, though **About** can still check and install a release when you ask. Because the signature is ad hoc, macOS sees each version as a new app: after an update, grant screen and microphone permission again (in System Settings, under Privacy & Security, if it doesn't ask).
+
 The first live caption asks for **Screen & System Audio Recording** permission, which is needed to hear the Mac's sound, or **Microphone** permission. You can manage both in System Settings, under Privacy & Security.
 
 ## Getting started
@@ -93,7 +96,7 @@ Video projects refer to the original file where it is. Taurus doesn't copy it.
 
 ```sh
 cargo test                                         # unit tests
-cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation, summaries
+cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation, summaries, updates
 ```
 
 The end-to-end tests use real models and `ffmpeg`, and the speaker test uses macOS `say` voices. Any model that is missing is downloaded the first time.
@@ -104,11 +107,12 @@ Debug builds accept environment variables that open the app straight into a give
 |---|---|
 | `TAURUS_DATA_DIR=<dir>` | Use another folder for the library, settings and recordings |
 | `TAURUS_VIEW=editor\|glossary` | Start in the open project or the glossary |
-| `TAURUS_DIALOG=engines\|capture\|export\|translate` | Open a dialog |
+| `TAURUS_DIALOG=engines\|capture\|export\|translate\|about` | Open a dialog |
 | `TAURUS_IMPORT=a.srt,b.vtt` / `TAURUS_EXTRACT=video.mp4` | Import files or pick a video |
 | `TAURUS_LIVE=system\|mic` | Start a live caption |
 | `TAURUS_PLAY=<ms>` / `TAURUS_SPEAKERS=1` / `TAURUS_TRANSLATE=1` | Play, identify speakers, or translate the open project |
 | `TAURUS_MENU=1` | Open the New menu |
+| `TAURUS_UPDATE_URL=<url>` | Look for releases at a stand-in for GitHub's latest-release API |
 
 ### Layout
 
@@ -127,6 +131,7 @@ src/
   subs.rs         SRT, VTT and ASS parsing
   data.rs         projects, checks, glossary rules, export
   store.rs        files on disk
+  update.rs       finding, checking and installing new releases
 assets/icon/      app icon; regenerate with `python3 assets/icon/make_icon.py`
 design/           the original design handoff
 ```

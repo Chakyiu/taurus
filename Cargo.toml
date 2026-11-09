@@ -1,6 +1,6 @@
 [package]
 name = "taurus"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 description = "Taurus, a subtitle translation workbench"
 
@@ -16,9 +16,16 @@ ureq = { version = "3", features = ["json"] }
 whisper-rs = { version = "0.16", features = ["metal"] }
 cpal = "0.18"
 screencapturekit = { version = "11", features = ["macos_15_0"] }
-ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-31",
+] }
 rustfft = "6"
 half = "2"
+sha2 = "0.10"
 
 [profile.dev]
 opt-level = 1

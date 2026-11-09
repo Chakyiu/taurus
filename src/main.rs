@@ -13,6 +13,7 @@ mod store;
 mod subs;
 mod theme;
 mod ui;
+mod update;
 mod views;
 mod work;
 

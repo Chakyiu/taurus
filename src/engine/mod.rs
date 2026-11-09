@@ -55,6 +55,10 @@ pub struct Settings {
     pub profile: String,
     /// The choices of the last capture started, which the dialog opens with.
     pub last_capture: Option<CaptureProfile>,
+    /// Look for a new release once a day and install it in the background.
+    pub auto_update: bool,
+    /// When a new release was last looked for, in seconds since 1970.
+    pub update_checked: i64,
 }
 
 /// What to listen to and record, saved under a name.
@@ -90,6 +94,8 @@ impl Default for Settings {
             profiles: Vec::new(),
             profile: String::new(),
             last_capture: None,
+            auto_update: true,
+            update_checked: 0,
         }
     }
 }

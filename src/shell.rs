@@ -8,16 +8,17 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, Corner, Div, Entity, ExternalPaths, Focusable,
      InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement,
     Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window, anchored,
-    deferred, div, px, relative,
+    deferred, div, img, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 
 use crate::app::*;
 use crate::data::*;
 use crate::engine::AsrChoice;
-use crate::icons::{Icon, icon};
+use crate::icons::{APP_ICON, Icon, icon};
 use crate::theme::{self as t, weight};
 use crate::ui::*;
+use crate::update;
 
 /// Layout thresholds from the design's media queries, read off the window.
 #[derive(Clone, Copy)]
@@ -49,13 +50,14 @@ impl Workbench {
     /// One slim bar: where you are on the left, what you can do on the right.
     /// The empty stretches drag the window.
     fn render_topbar(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        let update = self.update_button(bp, cx);
         let drag = || div().window_control_area(gpui::WindowControlArea::Drag);
         let back = || {
             button("top-back", Btn::Quiet, Some(Icon::Back), Some("Projects"), false)
                 .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)))
         };
         let mut left = row().gap(px(6.)).min_w_0();
-        let mut right = row().flex_none().gap(px(6.));
+        let mut right = row().flex_none().gap(px(6.)).children(update);
         match self.view {
             View::Projects => {
                 left = left.child(
@@ -76,6 +78,10 @@ impl Workbench {
                             false,
                         )
                         .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Glossary, w, cx))),
+                    )
+                    .child(
+                        button("top-about", Btn::Quiet, Some(Icon::Info), (!bp.mobile()).then_some("About"), false)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_about(cx))),
                     )
                     .child(self.new_button(cx));
             }
@@ -186,20 +192,25 @@ impl Workbench {
                 (false, _) => (t::warn(), "Set up engines".into()),
             },
         };
-        row()
-            .id("top-engines")
-            .flex_none()
-            .h(px(36.))
-            .px(px(10.))
-            .gap(px(8.))
-            .rounded(t::R)
-            .cursor_pointer()
-            .text_size(t::T_CONTROL)
-            .text_color(t::text_2())
-            .hover(|s| s.bg(t::surface_2()).text_color(t::text()))
-            .child(div().size(px(7.)).rounded_full().bg(dot))
-            .when(!bp.tiny(), |d| d.child(text))
-            .on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx)))
+        status_button("top-engines", dot, text, bp).on_click(cx.listener(|this, _, w, cx| this.open_engines(w, cx)))
+    }
+
+    /// Shown once a newer Taurus is installed, or found but not installed.
+    fn update_button(&self, bp: Bp, cx: &mut Context<Self>) -> Option<gpui::Stateful<Div>> {
+        let (text, restart) = match &self.update {
+            UpdateState::Ready(_) => ("Restart to update", true),
+            UpdateState::Available { .. } => ("Update available", false),
+            _ => return None,
+        };
+        Some(status_button("top-update", t::accent(), text.into(), bp).on_click(cx.listener(
+            move |this, _, _, cx| {
+                if restart {
+                    this.restart_to_update(cx)
+                } else {
+                    this.open_about(cx)
+                }
+            },
+        )))
     }
 
     fn new_button(&self, cx: &mut Context<Self>) -> Div {
@@ -462,7 +473,7 @@ impl Workbench {
             Dialog::Term { .. } => 520.,
             Dialog::Capture | Dialog::Extract | Dialog::Export => 480.,
             Dialog::Confirm { .. } | Dialog::Rename { .. } | Dialog::Translate => 400.,
-            Dialog::Summarize { .. } => 440.,
+            Dialog::Summarize { .. } | Dialog::About => 440.,
         };
         let max_w = px(f32::min(width, bp.w - 32.));
         let mut extra: Option<AnyElement> = None;
@@ -471,8 +482,9 @@ impl Workbench {
             button("dlg-x", Btn::Icon, Some(Icon::X), None, false)
                 .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx)))
         };
+        let cancel_label = if matches!(dialog, Dialog::About) { "Close" } else { "Cancel" };
         let cancel = |cx: &mut Context<Self>| {
-            button("dlg-cancel", Btn::Ghost, None, Some("Cancel"), false)
+            button("dlg-cancel", Btn::Ghost, None, Some(cancel_label), false)
                 .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx)))
         };
         let title_el = |text: String| {
@@ -703,6 +715,14 @@ impl Workbench {
                 button("dlg-ok", Btn::Primary, None, Some("Save"), false)
                     .on_click(cx.listener(|this, _, window, cx| this.save_engines(window, cx))),
             ),
+            Dialog::About => (
+                row()
+                    .gap(px(10.))
+                    .child(title_el("About Taurus".into()))
+                    .child(close_btn(cx)),
+                self.about_body(cx),
+                self.update_action(cx),
+            ),
             Dialog::Term {
                 editing,
                 rule,
@@ -830,6 +850,149 @@ impl Workbench {
                 .child(panel)
                 .into_any_element(),
         )
+    }
+
+    /// What Taurus is, which version this is, and whether there is a newer one.
+    fn about_body(&self, cx: &mut Context<Self>) -> Div {
+        let (status, color) = self.update_status();
+        let installing = matches!(self.update, UpdateState::Installing { .. });
+        col()
+            .gap(px(18.))
+            .child(
+                row()
+                    .gap(px(14.))
+                    .child(img(APP_ICON).size(px(56.)).flex_none())
+                    .child(
+                        col()
+                            .gap(px(2.))
+                            .child(div().text_size(px(17.)).font_weight(weight(620.)).child("Taurus"))
+                            .child(
+                                mono(div())
+                                    .text_size(t::T_SMALL)
+                                    .text_color(t::text_2())
+                                    .child(format!("Version {}", update::version())),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(t::text_2())
+                    .line_height(relative(1.6))
+                    .child("A subtitle workbench for macOS: caption live audio, transcribe videos, tell speakers apart, and translate, all on your own Mac."),
+            )
+            .child(
+                col()
+                    .gap(px(10.))
+                    .child(label("Updates"))
+                    .child(
+                        row()
+                            .items_start()
+                            .gap(px(12.))
+                            .child(
+                                fill()
+                                    .text_size(t::T_CONTROL)
+                                    .line_height(relative(1.5))
+                                    .text_color(color)
+                                    .child(status),
+                            )
+                            .when(installing, |d| {
+                                d.child(
+                                    link_button("upd-stop", "Stop")
+                                        .text_size(t::T_CONTROL)
+                                        .on_click(cx.listener(|this, _, _, cx| this.stop_update(cx))),
+                                )
+                            }),
+                    )
+                    .when(update::AUTOMATIC, |d| {
+                        d.child(
+                            switch("upd-auto", self.settings.auto_update, "Update automatically").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    let on = !this.settings.auto_update;
+                                    this.set_auto_update(on, cx)
+                                }),
+                            ),
+                        )
+                        .child(hint(
+                            "Looks for a new version once a day and installs it in the background, ready for the next time Taurus starts.",
+                        ))
+                    }),
+            )
+            .child(
+                row()
+                    .gap(px(16.))
+                    .text_size(t::T_SMALL)
+                    .child(
+                        link_button("about-notes", "Release notes")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_release_page(cx))),
+                    )
+                    .child(link_button("about-repo", "GitHub").on_click(cx.listener(|_, _, _, cx| cx.open_url(update::REPO)))),
+            )
+    }
+
+    /// A sentence on where updating has got to, and the colour to say it in.
+    fn update_status(&self) -> (String, gpui::Hsla) {
+        match &self.update {
+            UpdateState::Idle => match self.settings.update_checked {
+                0 => ("Taurus has not looked for a new version yet.".into(), t::text_2()),
+                at => {
+                    let when = when_label(at * 1000);
+                    let when = if ["Just now", "Today", "Yesterday"].iter().any(|w| when.starts_with(w)) {
+                        when.to_lowercase()
+                    } else {
+                        when
+                    };
+                    (format!("Last looked for a new version {when}."), t::text_2())
+                }
+            },
+            UpdateState::Checking => ("Looking for a new version…".into(), t::text_2()),
+            UpdateState::UpToDate => ("Taurus is up to date.".into(), t::text_2()),
+            UpdateState::Available { release, can_install: true } => {
+                (format!("Taurus {} is available.", release.version), t::accent_text())
+            }
+            UpdateState::Available { release, can_install: false } => {
+                let why = if !release.installable() {
+                    "Download it from GitHub."
+                } else if self.app_bundle.is_none() {
+                    "This build cannot replace itself, so download it from GitHub."
+                } else {
+                    "Taurus cannot replace itself where it is now. Move it to the Applications folder, or download this version from GitHub."
+                };
+                (format!("Taurus {} is available. {why}", release.version), t::warn_text())
+            }
+            UpdateState::Installing { release, pct, .. } => {
+                (format!("Downloading Taurus {}… {:.0}%", release.version, pct * 100.0), t::text_2())
+            }
+            UpdateState::Ready(version) => {
+                (format!("Taurus {version} is installed. Restart to start using it."), t::accent_text())
+            }
+            UpdateState::Failed(e) => {
+                (format!("Could not update: {}.", e.trim_end_matches('.')), t::danger_text())
+            }
+        }
+    }
+
+    /// The About dialog's main button: the next step in updating.
+    fn update_action(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        let busy = |text: &str| button("dlg-ok", Btn::Primary, None, Some(text), true);
+        match &self.update {
+            UpdateState::Checking => busy("Checking…"),
+            UpdateState::Installing { .. } => busy("Installing…"),
+            UpdateState::Available { release, can_install: true } => {
+                button("dlg-ok", Btn::Primary, Some(Icon::Download), Some(&format!("Install {}", release.version)), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.install_update(cx)))
+            }
+            UpdateState::Available { can_install: false, .. } => {
+                button("dlg-ok", Btn::Primary, Some(Icon::Download), Some("Download"), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_release_page(cx)))
+            }
+            UpdateState::Ready(_) => button("dlg-ok", Btn::Primary, Some(Icon::Refresh), Some("Restart to update"), false)
+                .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx))),
+            UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_) => {
+                button("dlg-ok", Btn::Primary, Some(Icon::Refresh), Some("Check for updates"), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.check_for_update(cx)))
+            }
+        }
     }
 
     fn engines_body(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -1081,6 +1244,23 @@ pub fn ring_shadow() -> gpui::BoxShadow {
         blur_radius: px(0.),
         spread_radius: px(1.),
     }
+}
+
+/// A coloured dot and a word or two in the top bar, for state worth a look.
+fn status_button(id: &'static str, dot: gpui::Hsla, text: String, bp: Bp) -> gpui::Stateful<Div> {
+    row()
+        .id(id)
+        .flex_none()
+        .h(px(36.))
+        .px(px(10.))
+        .gap(px(8.))
+        .rounded(t::R)
+        .cursor_pointer()
+        .text_size(t::T_CONTROL)
+        .text_color(t::text_2())
+        .hover(|s| s.bg(t::surface_2()).text_color(t::text()))
+        .child(div().size(px(7.)).rounded_full().bg(dot))
+        .when(!bp.tiny(), |d| d.child(text))
 }
 
 impl Render for Workbench {

@@ -23,6 +23,7 @@ use crate::engine::{AsrChoice, CaptureProfile, Settings};
 use crate::live::LiveSession;
 use crate::media::Probe;
 use crate::store;
+use crate::update::Release;
 use crate::work::{Bg, SpeakerJob};
 
 /// Debug builds honour `TAURUS_VIEW=editor|glossary` for screenshots.
@@ -336,6 +337,23 @@ pub enum Dialog {
         testing_asr: bool,
         testing_mt: bool,
     },
+    /// The version, and getting a newer one.
+    About,
+}
+
+/// How far finding and installing a new version has got.
+pub enum UpdateState {
+    /// Not looked for in this session.
+    Idle,
+    Checking,
+    UpToDate,
+    /// A newer release that is not being installed. `can_install` is false
+    /// when Taurus cannot replace itself where it runs.
+    Available { release: Release, can_install: bool },
+    Installing { release: Release, pct: f32, cancel: Arc<AtomicBool> },
+    /// Installed; Taurus runs it from the next launch.
+    Ready(String),
+    Failed(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -351,6 +369,7 @@ pub enum ToastAction {
     Open(String),
     Delete(String),
     Engines,
+    Restart,
 }
 
 pub struct Toast {
@@ -436,6 +455,10 @@ pub struct Workbench {
     /// The summary currently being written, if any.
     pub summary_job: Option<SummaryJob>,
     pub downloads: HashMap<String, Download>,
+    pub update: UpdateState,
+    /// The app bundle Taurus runs from, which an update replaces. None for a
+    /// development build.
+    pub app_bundle: Option<PathBuf>,
     pub(crate) bg_tx: Sender<Bg>,
     pub(crate) bg_rx: Receiver<Bg>,
     pub(crate) saved_json: String,
@@ -709,6 +732,8 @@ impl Workbench {
             jobs: HashMap::new(),
             summary_job: None,
             downloads: HashMap::new(),
+            update: UpdateState::Idle,
+            app_bundle: cx.app_path().ok().and_then(|p| crate::update::bundle(&p)),
             bg_tx,
             bg_rx,
             saved_json,
@@ -756,7 +781,7 @@ impl Workbench {
 
     /// Debug builds can open straight into a flow for screenshots:
     /// `TAURUS_IMPORT=a.srt,b.vtt`, `TAURUS_EXTRACT=video.mp4`,
-    /// `TAURUS_DIALOG=engines|capture|export|translate`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
+    /// `TAURUS_DIALOG=engines|capture|export|translate|about`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
     /// `TAURUS_SPEAKERS=1`, `TAURUS_TRANSLATE=1`, `TAURUS_VIDEO=Entire screen|<app>`.
     fn debug_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !cfg!(debug_assertions) {
@@ -773,6 +798,7 @@ impl Workbench {
             Ok("capture") => self.open_capture(cx),
             Ok("export") => self.open_export(cx),
             Ok("translate") => self.open_translate(cx),
+            Ok("about") => self.open_about(cx),
             _ => {}
         }
         if std::env::var("TAURUS_MENU").is_ok() {
@@ -1164,6 +1190,7 @@ impl Workbench {
             Some(ToastAction::Open(pid)) => self.open_project(&pid, window, cx),
             Some(ToastAction::Delete(pid)) => self.delete_project(&pid, window, cx),
             Some(ToastAction::Engines) => self.open_engines(window, cx),
+            Some(ToastAction::Restart) => self.restart_to_update(cx),
             None => {}
         }
         cx.notify();

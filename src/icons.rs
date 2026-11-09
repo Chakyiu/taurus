@@ -1,4 +1,5 @@
-//! The prototype's 24px stroke icon set, served to gpui as SVG assets.
+//! The prototype's 24px stroke icon set, served to gpui as SVG assets, with
+//! the app's own icon beside them.
 
 use std::borrow::Cow;
 
@@ -37,6 +38,7 @@ pub enum Icon {
     Users,
     Translate,
     Summary,
+    Info,
 }
 
 const ALL: &[Icon] = &[
@@ -70,6 +72,7 @@ const ALL: &[Icon] = &[
     Icon::Users,
     Icon::Translate,
     Icon::Summary,
+    Icon::Info,
 ];
 
 impl Icon {
@@ -88,6 +91,7 @@ impl Icon {
             Icon::Users => "users",
             Icon::Translate => "translate",
             Icon::Summary => "summary",
+            Icon::Info => "info",
             Icon::Monitor => "monitor",
             Icon::Crop => "crop",
             Icon::Swap => "swap",
@@ -136,6 +140,7 @@ impl Icon {
             }
             Icon::Translate => "M4 5h9M8.5 3v2M6 5c1 3.5 3.5 6 6.5 7.5M11 5c-1 4-3.5 7.5-7 9.5M12.5 20.5l4-10 4 10M14 17h5",
             Icon::Summary => "M6.5 3.5h7.2L18 8v12.5H6.5zM13.5 3.8V8H18M9 12h6M9 15.2h6M9 18.4h3.6",
+            Icon::Info => "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM12 11v5.2M12 7.9h.01",
             Icon::Crop => "M7.5 3v4.5H3M16.5 21v-4.5H21M3 16.5h4.5V21M21 7.5h-4.5V3",
             Icon::Swap => {
                 "M7 6.5h12m0 0-3.2-3.2M19 6.5l-3.2 3.2M17 17.5H5m0 0 3.2-3.2M5 17.5l3.2 3.2"
@@ -183,8 +188,13 @@ pub fn icon(icon: Icon, size: Pixels, color: Hsla) -> Svg {
 
 pub struct Assets;
 
+pub const APP_ICON: &str = "app/icon.png";
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/icon/icon-256.png"))));
+        }
         let Some(name) = path
             .strip_prefix("icons/")
             .and_then(|p| p.strip_suffix(".svg"))

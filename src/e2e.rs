@@ -282,6 +282,147 @@ fn e2e_stops_a_summary_mid_reply() {
     hung_up.recv_timeout(Duration::from_secs(2)).expect("the server should see the client hang up");
 }
 
+/// Serves fixed files by path, like GitHub's release API and downloads.
+/// `files` gets the server's address, so the files can link to each other.
+fn file_server(files: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let files = files(&base);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() <= 2 {
+                    break;
+                }
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or("/");
+            let (status, body) = match files.iter().find(|(p, _)| p == path) {
+                Some((_, body)) => ("200 OK", body.as_slice()),
+                None => ("404 Not Found", &b"{}"[..]),
+            };
+            let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(body);
+        }
+    });
+    base
+}
+
+/// A minimal signed Taurus.app in `dir`, claiming to be `version`.
+fn fake_app(dir: &std::path::Path, version: &str) -> PathBuf {
+    let app = dir.join("Taurus.app");
+    let _ = std::fs::remove_dir_all(&app);
+    std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    std::fs::copy("/usr/bin/true", app.join("Contents/MacOS/taurus")).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.taurus.workbench</string>
+<key>CFBundleExecutable</key><string>taurus</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+        ),
+    )
+    .unwrap();
+    let ok = Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app).status().unwrap();
+    assert!(ok.success(), "codesign failed");
+    app
+}
+
+/// A release is found, checked against its checksum, unpacked and swapped
+/// in for the installed app. A corrupt or stopped download leaves it be.
+#[test]
+#[ignore]
+fn e2e_installs_an_update() {
+    use crate::update;
+    use sha2::Digest as _;
+
+    let dir = fixture_dir().join("update");
+    let _ = std::fs::remove_dir_all(&dir);
+    let build = dir.join("build");
+    std::fs::create_dir_all(&build).unwrap();
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { std::env::consts::ARCH };
+    let zip_name = format!("Taurus-v9.9.9-macos-{arch}.zip");
+    let zip = build.join(&zip_name);
+    let packed = Command::new("ditto")
+        .args(["-c", "-k", "--keepParent"])
+        .arg(fake_app(&build, "9.9.9"))
+        .arg(&zip)
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let zip_bytes = std::fs::read(&zip).unwrap();
+    let sum: String = sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect();
+
+    let base = file_server(|base| {
+        let release = |sums: &str| {
+            serde_json::json!({
+                "tag_name": "v9.9.9",
+                "html_url": format!("{base}/page"),
+                "draft": false,
+                "prerelease": false,
+                "assets": [
+                    { "name": zip_name, "browser_download_url": format!("{base}/zip") },
+                    { "name": "SHA256SUMS.txt", "browser_download_url": format!("{base}/{sums}") },
+                ],
+            })
+            .to_string()
+            .into_bytes()
+        };
+        vec![
+            ("/latest".into(), release("sums")),
+            ("/latest-corrupt".into(), release("wrong-sums")),
+            ("/zip".into(), zip_bytes),
+            ("/sums".into(), format!("{sum}  {zip_name}\n").into_bytes()),
+            ("/wrong-sums".into(), format!("{}  {zip_name}\n", "0".repeat(64)).into_bytes()),
+        ]
+    });
+
+    assert_eq!(update::newer_release(&format!("{base}/latest"), "9.9.9").unwrap(), None);
+    let release = update::newer_release(&format!("{base}/latest"), "0.1.0").unwrap().expect("9.9.9 is newer");
+    let corrupt = update::newer_release(&format!("{base}/latest-corrupt"), "0.1.0").unwrap().unwrap();
+    assert!(release.installable());
+
+    let apps = dir.join("Applications");
+    std::fs::create_dir_all(&apps).unwrap();
+    let version = |app: &std::path::Path| {
+        let out = Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :CFBundleShortVersionString"])
+            .arg(app.join("Contents/Info.plist"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let left_in = |dir: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+    };
+
+    let installed = fake_app(&apps, "0.1.0");
+    assert!(update::can_replace(&installed));
+    let err = update::install(&corrupt, &installed, |_| {}, &AtomicBool::new(false)).unwrap_err();
+    println!("corrupt: {err:#}");
+    assert!(format!("{err:#}").contains("checksum"));
+    let err = update::install(&release, &installed, |_| {}, &AtomicBool::new(true)).unwrap_err();
+    assert_eq!(err.to_string(), "cancelled");
+    assert_eq!(version(&installed), "0.1.0");
+    assert_eq!(left_in(&apps), vec!["Taurus.app"]);
+
+    let seen = std::sync::Mutex::new(0.0f32);
+    update::install(&release, &installed, |p| *seen.lock().unwrap() = p, &AtomicBool::new(false)).unwrap();
+    assert_eq!(version(&installed), "9.9.9");
+    assert_eq!(*seen.lock().unwrap(), 1.0);
+    assert_eq!(left_in(&apps), vec!["Taurus.app"]);
+}
+
 /// Two synthetic voices taking turns: the speakers should come back as the
 /// same alternation.
 #[test]

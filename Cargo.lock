@@ -6421,7 +6421,7 @@ dependencies = [
 
 [[package]]
 name = "taurus"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6435,6 +6435,7 @@ dependencies = [
  "screencapturekit 11.1.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ureq",
  "whisper-rs",
 ]

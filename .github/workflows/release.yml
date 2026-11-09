@@ -82,7 +82,10 @@ jobs:
       - name: Install cargo-bundle
         run: cargo install cargo-bundle --version 0.12.0 --locked
 
+      # Only builds made here install new releases by themselves.
       - name: Bundle
+        env:
+          TAURUS_RELEASE: "1"
         run: cargo bundle --release
 
       - name: Sign and package

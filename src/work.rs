@@ -18,6 +18,7 @@ use crate::live::{self, LiveEvent};
 use crate::media::{self, Probe};
 use crate::store;
 use crate::subs::{self, is_cjk};
+use crate::update::{self, Release};
 
 pub enum Bg {
     Lines { pid: String, job: u64, lines: Vec<(usize, String)> },
@@ -38,6 +39,9 @@ pub enum Bg {
     SummaryProgress { job: u64, done: usize, parts: usize },
     Summary { pid: String, job: u64, result: Result<String, String> },
     SummaryModels(Result<Vec<String>, String>),
+    UpdateChecked(Result<Option<Release>, String>),
+    UpdateProgress(f32),
+    UpdateInstalled { version: String, result: Result<(), String> },
 }
 
 pub struct SpeakerJob {
@@ -69,6 +73,7 @@ impl Workbench {
             changed = true;
         }
         changed |= self.follow_playback();
+        self.check_daily_for_update(cx);
         if self.last_save.elapsed() > Duration::from_millis(1500) {
             self.last_save = Instant::now();
             self.autosave(cx);
@@ -144,6 +149,13 @@ impl Workbench {
             }
             Bg::Summary { pid, job, result } => self.summary_arrived(pid, job, result, cx),
             Bg::SummaryModels(result) => self.summary_models(result, cx),
+            Bg::UpdateChecked(result) => self.update_checked(result, cx),
+            Bg::UpdateProgress(p) => {
+                if let UpdateState::Installing { pct, .. } = &mut self.update {
+                    *pct = p;
+                }
+            }
+            Bg::UpdateInstalled { version, result } => self.update_installed(version, result, cx),
             Bg::AsrTest(r) => {
                 if let Some(Dialog::Engines { asr_test, testing_asr, .. }) = &mut self.dialog {
                     *asr_test = Some(r);
@@ -1757,6 +1769,141 @@ impl Workbench {
             d.cancel.store(true, Ordering::Relaxed);
         }
         cx.notify();
+    }
+
+    // ─── updates ───────────────────────────────────────────
+
+    /// Shows the version, looking for a newer one the first time.
+    pub fn open_about(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        self.dialog = Some(Dialog::About);
+        if matches!(self.update, UpdateState::Idle) {
+            self.check_for_update(cx);
+        }
+        cx.notify();
+    }
+
+    /// Release builds look once a day while updates are automatic.
+    fn check_daily_for_update(&mut self, cx: &mut Context<Self>) {
+        let settled = matches!(self.update, UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_));
+        if update::AUTOMATIC
+            && self.settings.auto_update
+            && self.app_bundle.is_some()
+            && settled
+            && update::now() - self.settings.update_checked >= update::DAY
+        {
+            self.check_for_update(cx);
+        }
+    }
+
+    pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.update, UpdateState::Checking | UpdateState::Installing { .. } | UpdateState::Ready(_)) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        self.settings.update_checked = update::now();
+        if let Err(e) = store::save_settings(&self.settings) {
+            eprintln!("saving settings: {e:#}");
+        }
+        let tx = self.bg_tx.clone();
+        spawn("update-check", move || {
+            let result = update::newer_release(&update::latest_url(), update::version()).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Bg::UpdateChecked(result));
+        });
+        cx.notify();
+    }
+
+    fn update_checked(&mut self, result: Result<Option<Release>, String>, cx: &mut Context<Self>) {
+        self.update = match result {
+            Ok(None) => UpdateState::UpToDate,
+            Ok(Some(release)) => {
+                let can_install = release.installable() && self.app_bundle.as_deref().is_some_and(update::can_replace);
+                if can_install && update::AUTOMATIC && self.settings.auto_update {
+                    self.start_install(release, cx);
+                    return;
+                }
+                UpdateState::Available { release, can_install }
+            }
+            Err(e) => UpdateState::Failed(e),
+        };
+        cx.notify();
+    }
+
+    /// Installs the release on offer, when asked to.
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        if let UpdateState::Available { release, can_install: true } = &self.update {
+            self.start_install(release.clone(), cx);
+        }
+    }
+
+    fn start_install(&mut self, release: Release, cx: &mut Context<Self>) {
+        let Some(bundle) = self.app_bundle.clone() else { return };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.update = UpdateState::Installing { release: release.clone(), pct: 0.0, cancel: cancel.clone() };
+        let tx = self.bg_tx.clone();
+        spawn("update", move || {
+            let last = AtomicU32::new(0);
+            let progress = |p: f32| {
+                let pm = (p * 1000.0) as u32;
+                if pm != last.swap(pm, Ordering::Relaxed) {
+                    let _ = tx.send(Bg::UpdateProgress(p));
+                }
+            };
+            let result = update::install(&release, &bundle, progress, &cancel).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Bg::UpdateInstalled { version: release.version, result });
+        });
+        cx.notify();
+    }
+
+    fn update_installed(&mut self, version: String, result: Result<(), String>, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => {
+                self.update = UpdateState::Ready(version.clone());
+                self.toast(
+                    format!("Taurus {version} is installed. Restart to start using it."),
+                    ToastKind::Ok,
+                    Some(("Restart", ToastAction::Restart)),
+                    cx,
+                );
+            }
+            Err(e) if e == "cancelled" => {}
+            Err(e) => {
+                if matches!(self.update, UpdateState::Installing { .. }) {
+                    self.update = UpdateState::Failed(e);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stops a download in progress; the release stays on offer.
+    pub fn stop_update(&mut self, cx: &mut Context<Self>) {
+        if let UpdateState::Installing { release, cancel, .. } = &self.update {
+            cancel.store(true, Ordering::Relaxed);
+            self.update = UpdateState::Available { release: release.clone(), can_install: true };
+        }
+        cx.notify();
+    }
+
+    pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        cx.restart();
+    }
+
+    pub fn set_auto_update(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.auto_update = on;
+        if let Err(e) = store::save_settings(&self.settings) {
+            eprintln!("saving settings: {e:#}");
+        }
+        cx.notify();
+    }
+
+    /// The release on offer, or the list of releases, on GitHub.
+    pub fn open_release_page(&mut self, cx: &mut Context<Self>) {
+        let page = match &self.update {
+            UpdateState::Available { release, .. } | UpdateState::Installing { release, .. } => release.page.clone(),
+            _ => update::RELEASES.to_string(),
+        };
+        cx.open_url(&page);
     }
 }
 
