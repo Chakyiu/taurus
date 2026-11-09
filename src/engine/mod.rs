@@ -271,6 +271,16 @@ pub(crate) fn agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
+/// For replies that take as long as they take: only reaching the server is
+/// timed, and the caller stops the rest when it wants to.
+pub(crate) fn untimed_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
 /// Turns a non-2xx response into an error carrying the server's own message.
 pub(crate) fn check(mut resp: ureq::http::Response<ureq::Body>) -> Result<ureq::http::Response<ureq::Body>> {
     let status = resp.status();

@@ -1,13 +1,14 @@
 //! Translation through any OpenAI-compatible `/chat/completions` endpoint:
 //! OpenAI, OpenRouter, vLLM, LM Studio or a local Ollama.
 
+use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
-use super::{agent, check};
+use super::{agent, check, untimed_agent};
 use crate::data::{Rule, Term, lang_name};
 
 #[derive(Clone, Debug)]
@@ -105,17 +106,67 @@ fn request(
 }
 
 fn chat(cfg: &MtConfig, body: &Value) -> Result<String> {
-    let mut req = agent(Duration::from_secs(180)).post(format!("{}/chat/completions", cfg.url));
+    let mut resp = post(agent(Duration::from_secs(180)), cfg, body)?;
+    let v: Value = resp.body_mut().read_json().context("reading the reply")?;
+    reply_text(&v)
+}
+
+/// Streams the reply, so it needs no deadline and can still be stopped:
+/// dropping the stream closes the connection, which stops the server too.
+fn chat_streamed(cfg: &MtConfig, mut body: Value, cancel: &AtomicBool) -> Result<String> {
+    body["stream"] = json!(true);
+    let mut resp = post(untimed_agent(), cfg, &body)?;
+    read_reply(BufReader::new(resp.body_mut().as_reader()), cancel)
+}
+
+fn post(agent: ureq::Agent, cfg: &MtConfig, body: &Value) -> Result<ureq::http::Response<ureq::Body>> {
+    let mut req = agent.post(format!("{}/chat/completions", cfg.url));
     if !cfg.key.is_empty() {
         req = req.header("Authorization", format!("Bearer {}", cfg.key));
     }
     let resp = req.send_json(body).with_context(|| format!("contacting {}", cfg.url))?;
-    let mut resp = check(resp)?;
-    let v: Value = resp.body_mut().read_json().context("reading the reply")?;
+    check(resp)
+}
+
+fn reply_text(v: &Value) -> Result<String> {
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .context("the reply had no message")?;
     Ok(strip_thinking(content))
+}
+
+/// The text of a streamed reply: server-sent events carrying pieces of the
+/// message, or the whole reply at once from a server that does not stream.
+fn read_reply(reader: impl BufRead, cancel: &AtomicBool) -> Result<String> {
+    let mut text = String::new();
+    let mut whole = String::new();
+    let mut streamed = false;
+    for line in reader.lines() {
+        if cancel.load(Ordering::Relaxed) {
+            bail!("cancelled");
+        }
+        let line = line.context("reading the reply")?;
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            whole.push_str(&line);
+            whole.push('\n');
+            continue;
+        };
+        streamed = true;
+        if data == "[DONE]" {
+            break;
+        }
+        let v: Value = serde_json::from_str(data).context("reading the reply")?;
+        if let Some(msg) = v["error"]["message"].as_str().or(v["error"].as_str()) {
+            bail!("{msg}");
+        }
+        if let Some(piece) = v["choices"][0]["delta"]["content"].as_str() {
+            text.push_str(piece);
+        }
+    }
+    if !streamed {
+        return reply_text(&serde_json::from_str(&whole).context("reading the reply")?);
+    }
+    Ok(strip_thinking(&text))
 }
 
 /// Reasoning models (Qwen3, DeepSeek-R1) prefix their answer with a thought block.
@@ -196,13 +247,16 @@ pub fn list_models(cfg: &MtConfig) -> Result<Vec<String>> {
 }
 
 /// A prose account of a transcript, written in `lang` (a language name).
-/// `long` asks for a few paragraphs instead of a few sentences.
+/// `long` asks for a few paragraphs instead of a few sentences. A transcript
+/// too long for one request is summarized in parts, then the parts are
+/// joined; `progress` hears how many parts are done, out of how many.
 pub fn summarize(
     cfg: &MtConfig,
     lang: &str,
     long: bool,
     rules: &[String],
     transcript: &str,
+    progress: impl Fn(usize, usize),
     cancel: &AtomicBool,
 ) -> Result<String> {
     let transcript = transcript.trim();
@@ -218,6 +272,7 @@ pub fn summarize(
         if cancel.load(Ordering::Relaxed) {
             bail!("cancelled");
         }
+        progress(i, parts.len());
         let note = format!(
             "This is part {} of {} of one transcript. Summarize only this part.",
             i + 1,
@@ -225,6 +280,7 @@ pub fn summarize(
         );
         partials.push(one_summary(cfg, lang, long, rules, part, Some(&note), cancel)?);
     }
+    progress(parts.len(), parts.len());
     let fold = if long {
         "These are summaries of consecutive parts of one transcript. Combine them into one fuller account, without repeating yourself."
     } else {
@@ -277,7 +333,7 @@ fn one_summary(
             { "role": "user", "content": text },
         ],
     });
-    let content = chat(cfg, &body)?;
+    let content = chat_streamed(cfg, body, cancel)?;
     let prose = plain_prose(&content);
     if prose.is_empty() {
         bail!("the reply was empty");
@@ -357,5 +413,22 @@ mod tests {
             parse_model_ids(r#"{"models":[{"name":"mistral"}]}"#),
             vec!["mistral"]
         );
+    }
+
+    #[test]
+    fn reads_streamed_replies() {
+        let go = AtomicBool::new(false);
+        let sse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+                   : keep-alive\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"<think>hmm</think>Hel\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"reasoning\":\"an aside\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"lo.\"},\"finish_reason\":\"stop\"}]}\n\n\
+                   data: [DONE]\n\n";
+        assert_eq!(read_reply(sse.as_bytes(), &go).unwrap(), "Hello.");
+        let whole = "{\"choices\":[{\"message\":{\"content\":\"In one piece.\"}}]}";
+        assert_eq!(read_reply(whole.as_bytes(), &go).unwrap(), "In one piece.");
+        let failed = "data: {\"error\":{\"message\":\"model not found\"}}\n\n";
+        assert_eq!(read_reply(failed.as_bytes(), &go).unwrap_err().to_string(), "model not found");
+        assert!(read_reply(sse.as_bytes(), &AtomicBool::new(true)).is_err());
     }
 }

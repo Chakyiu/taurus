@@ -3,11 +3,13 @@
 //! they only run on request: `cargo test e2e -- --ignored --nocapture`.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use crate::engine::asr::Engine;
 use crate::engine::{AsrChoice, Settings, WhisperModel, mt};
@@ -165,6 +167,26 @@ fn e2e_qwen_transcribes_on_this_mac() {
     assert!(segs.len() >= 2, "each sentence should be its own cue");
 }
 
+/// The JSON body of one request to a mock server.
+fn read_request(stream: &TcpStream) -> serde_json::Value {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut len = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+            len = v.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0u8; len];
+    reader.read_exact(&mut body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
 /// A stand-in for an OpenAI-compatible server: replies to each chat request
 /// with the numbered lines it was sent, prefixed, wrapped in a think block
 /// like reasoning models do.
@@ -174,22 +196,7 @@ fn mock_chat_server() -> String {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut len = 0usize;
-            let mut line = String::new();
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0u8; len];
-            reader.read_exact(&mut body).unwrap();
-            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let req = read_request(&stream);
             let user = req["messages"].as_array().unwrap().last().unwrap()["content"]
                 .as_str()
                 .unwrap()
@@ -229,6 +236,50 @@ fn e2e_translates_through_a_chat_endpoint() {
     assert_eq!(out.len(), 2);
     assert!(out[1].starts_with("译:") && out[1].contains("decoder"));
     assert!(mt::test(&cfg, "zh").unwrap().starts_with("译:"));
+}
+
+/// A chat endpoint like a slow model on a long transcript: it streams a word
+/// every 50 ms and never finishes. The receiver hears when the client hangs up.
+fn endless_chat_server() -> (String, Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            if read_request(&stream)["stream"] != true {
+                continue;
+            }
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let event = format!("data: {}\n\n", serde_json::json!({ "choices": [{ "delta": { "content": "word " } }] }));
+            while write!(stream, "{:x}\r\n{event}\r\n", event.len()).and_then(|_| stream.flush()).is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = tx.send(());
+        }
+    });
+    (format!("http://{addr}/v1"), rx)
+}
+
+/// A summary has no deadline, so stopping it has to end the reply at once
+/// and hang up, which is what tells the server to stop writing.
+#[test]
+#[ignore]
+fn e2e_stops_a_summary_mid_reply() {
+    let (url, hung_up) = endless_chat_server();
+    let cfg = mt::MtConfig { url, model: "mock".into(), key: String::new() };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Relaxed);
+    });
+    let t = Instant::now();
+    let result = mt::summarize(&cfg, "English", false, &[], "Good morning.", |_, _| {}, &cancel);
+    println!("{result:?} after {:?}", t.elapsed());
+    assert_eq!(result.unwrap_err().to_string(), "cancelled");
+    assert!(t.elapsed() < Duration::from_secs(2));
+    hung_up.recv_timeout(Duration::from_secs(2)).expect("the server should see the client hang up");
 }
 
 /// Two synthetic voices taking turns: the speakers should come back as the

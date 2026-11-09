@@ -367,6 +367,10 @@ pub struct SummaryJob {
     pub lang: String,
     pub model: String,
     pub long: bool,
+    /// Parts of a long transcript summarized so far, out of `parts`, which
+    /// stays 0 for a transcript short enough to go in one piece.
+    pub done: usize,
+    pub parts: usize,
     pub(crate) cancel: Arc<AtomicBool>,
 }
 

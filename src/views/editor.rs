@@ -98,7 +98,12 @@ impl Workbench {
     fn summary_panel(&self, bp: Bp, cx: &mut Context<Self>) -> Div {
         let Some(p) = self.current() else { return div() };
         let writing = self.summary_job.as_ref().filter(|j| j.pid == p.id).map(|j| {
-            format!("Writing a summary in {} with {}…", lang_name(&j.lang), j.model)
+            let step = match (j.done, j.parts) {
+                (_, 0 | 1) => String::new(),
+                (done, parts) if done < parts => format!(", part {} of {parts}", done + 1),
+                (_, parts) => format!(", joining the {parts} parts"),
+            };
+            format!("Writing a summary in {} with {}{step}…", lang_name(&j.lang), j.model)
         });
         let text = p.summary.trim().to_string();
         let meta = summary_meta(p);
@@ -123,6 +128,12 @@ impl Workbench {
                         d.child(
                             link_button("sum-again", "Summarize again")
                                 .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
+                        )
+                    })
+                    .when(writing.is_some(), |d| {
+                        d.child(
+                            link_button("sum-stop", "Stop")
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_summary(cx))),
                         )
                     })
                     .when(!text.is_empty(), |d| {

@@ -35,6 +35,7 @@ pub enum Bg {
     Playback { pid: String, result: Result<Vec<f32>, String> },
     SpeakerProgress { pid: String, done: usize },
     Speakers { pid: String, result: Result<Vec<usize>, String> },
+    SummaryProgress { job: u64, done: usize, parts: usize },
     Summary { pid: String, job: u64, result: Result<String, String> },
     SummaryModels(Result<Vec<String>, String>),
 }
@@ -135,6 +136,12 @@ impl Workbench {
                 }
             }
             Bg::Speakers { pid, result } => self.speakers_found(pid, result, cx),
+            Bg::SummaryProgress { job, done, parts } => {
+                if let Some(j) = self.summary_job.as_mut().filter(|j| j.id == job) {
+                    j.done = done;
+                    j.parts = parts;
+                }
+            }
             Bg::Summary { pid, job, result } => self.summary_arrived(pid, job, result, cx),
             Bg::SummaryModels(result) => self.summary_models(result, cx),
             Bg::AsrTest(r) => {
@@ -1656,17 +1663,31 @@ impl Workbench {
             lang: lang.clone(),
             model: model.clone(),
             long,
+            done: 0,
+            parts: 0,
             cancel: cancel.clone(),
         });
         let tx = self.bg_tx.clone();
         spawn("summary", move || {
-            let result = mt::summarize(&cfg, &lang_label, long, &rules, &transcript, &cancel);
+            let progress = |done, parts| {
+                let _ = tx.send(Bg::SummaryProgress { job, done, parts });
+            };
+            let result = mt::summarize(&cfg, &lang_label, long, &rules, &transcript, progress, &cancel);
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
             let result = result.map_err(|e| friendly(&e, &cfg.url));
             let _ = tx.send(Bg::Summary { pid, job, result });
         });
+        cx.notify();
+    }
+
+    /// Ends the summary being written. Whatever summary the project already
+    /// had stays as it was.
+    pub fn stop_summary(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.summary_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         cx.notify();
     }
 

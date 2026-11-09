@@ -17,7 +17,7 @@
 - **Import subtitles.** Drop in `.srt`, `.vtt`, `.ass` or `.ssa` files.
 - **Speaker identification.** Works out who said each line and labels it Speaker 1, Speaker 2 and so on. Click a name to rename that speaker everywhere.
 - **Translation, if you want it.** Off by default. Turn it on when you start a capture or a video, or add it to any project later. It works with any OpenAI-compatible endpoint, such as a local Ollama, and follows your glossary.
-- **Summary.** A short account of the lines, through the translation endpoint. You choose the language, the model and whether it is a few sentences or a fuller account. It stays with the project.
+- **Summary.** A short account of the lines, through the translation endpoint. You choose the language, the model and whether it is a few sentences or a fuller account. It stays with the project. A long recording is summarized part by part with no time limit; the panel shows which part it is on, and **Stop** ends it.
 - **Review.** Each line is checked against reading speed (17 characters per second), line length (42 characters) and the gap to the next line. "Only lines to check" shows just the lines that need work. Click any text to edit it.
 - **Playback.** Play the project's audio, click a timestamp to jump to it, and the list follows along. Space plays and pauses.
 - **Glossary.** Terms you prefer, keep untranslated, or never want to see. Each one applies to every project or to just one.
@@ -93,7 +93,7 @@ Video projects refer to the original file where it is. Taurus doesn't copy it.
 
 ```sh
 cargo test                                         # unit tests
-cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation
+cargo test e2e -- --ignored --test-threads=1       # end-to-end: ffmpeg, Whisper, Qwen, speakers, translation, summaries
 ```
 
 The end-to-end tests use real models and `ffmpeg`, and the speaker test uses macOS `say` voices. Any model that is missing is downloaded the first time.

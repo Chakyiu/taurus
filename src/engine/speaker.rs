@@ -88,8 +88,19 @@ impl SpeakerModel {
 const MIN_MS: i64 = 1_200;
 /// Longer cues are fingerprinted from their middle.
 const MAX_MS: i64 = 12_000;
-/// Two groups whose voices are at least this alike are the same speaker.
+/// Two groups whose lines are, on average, at least this alike are the same
+/// speaker.
 const SAME_SPEAKER: f32 = 0.5;
+/// Two groups whose average voices are at least this alike are the same
+/// speaker. A single line is a noisy sample of a voice, so one speaker's
+/// lines can split into groups that look apart line by line but not on
+/// average.
+const SAME_VOICE: f32 = 0.7;
+/// A group with less speech than this is not taken for a voice of its own:
+/// lines where two people talk, or only noise, gather in groups like these.
+/// Short recordings lower it to `MIN_SHARE` of all their speech.
+const MIN_SPEECH_MS: f32 = 20_000.0;
+const MIN_SHARE: f32 = 0.03;
 
 /// Labels each cue with a speaker number, numbered in order of first
 /// appearance. `spans` are cue times in milliseconds on `pcm`'s clock.
@@ -101,7 +112,7 @@ pub fn identify(
     cancel: &AtomicBool,
 ) -> Result<Vec<usize>> {
     let len_ms = (pcm.len() / 16) as i64;
-    let mut embs: Vec<Option<Vec<f32>>> = Vec::with_capacity(spans.len());
+    let mut embs: Vec<Option<(Vec<f32>, f32)>> = Vec::with_capacity(spans.len());
     for (i, &(a, b)) in spans.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             bail!("cancelled");
@@ -116,45 +127,28 @@ pub fn identify(
             (a, b) = ((a - pad).max(0), (b + pad).min(len_ms));
         }
         let slice = &pcm[(a * 16) as usize..(b * 16) as usize];
-        embs.push(model.embed(slice).ok());
+        embs.push(model.embed(slice).ok().map(|v| (v, (b - a) as f32)));
         progress(i + 1);
     }
     Ok(cluster(&embs))
 }
 
-/// Average-linkage grouping on cosine similarity. Cues without a fingerprint
-/// join the speaker just before them.
-fn cluster(embs: &[Option<Vec<f32>>]) -> Vec<usize> {
+/// Groups fingerprints, each weighted by the milliseconds of audio it was
+/// taken from: average-linkage grouping on cosine similarity, then groups
+/// too small to be a voice folded into the closest other, then groups with
+/// alike average voices merged. Cues without a fingerprint join the speaker
+/// just before them.
+fn cluster(embs: &[Option<(Vec<f32>, f32)>]) -> Vec<usize> {
     let idx: Vec<usize> = (0..embs.len()).filter(|&i| embs[i].is_some()).collect();
-    let mut groups: Vec<Vec<usize>> = idx.iter().map(|&i| vec![i]).collect();
-    let sim = |a: usize, b: usize| -> f32 {
-        let (x, y) = (embs[a].as_ref().unwrap(), embs[b].as_ref().unwrap());
-        x.iter().zip(y).map(|(p, q)| p * q).sum()
-    };
-    loop {
-        let mut best = (SAME_SPEAKER, None);
-        for g in 0..groups.len() {
-            for h in g + 1..groups.len() {
-                let mut total = 0.0;
-                for &a in &groups[g] {
-                    for &b in &groups[h] {
-                        total += sim(a, b);
-                    }
-                }
-                let avg = total / (groups[g].len() * groups[h].len()) as f32;
-                if avg > best.0 {
-                    best = (avg, Some((g, h)));
-                }
-            }
-        }
-        let Some((g, h)) = best.1 else { break };
-        let moved = groups.remove(h);
-        groups[g].extend(moved);
-    }
+    let v: Vec<&[f32]> = idx.iter().map(|&i| &embs[i].as_ref().unwrap().0[..]).collect();
+    let w: Vec<f32> = idx.iter().map(|&i| embs[i].as_ref().unwrap().1).collect();
+    let mut groups = link(&v);
+    absorb_small(&mut groups, &v, &w);
+    merge_alike(&mut groups, &v, &w);
     let mut of = vec![None; embs.len()];
     for (n, g) in groups.iter().enumerate() {
         for &i in g {
-            of[i] = Some(n);
+            of[idx[i]] = Some(n);
         }
     }
     // Renumber by first appearance, so the first voice heard is speaker 1.
@@ -176,6 +170,91 @@ fn cluster(embs: &[Option<Vec<f32>>]) -> Vec<usize> {
         out.push(label);
     }
     out
+}
+
+fn dot(x: &[f32], y: &[f32]) -> f32 {
+    x.iter().zip(y).map(|(p, q)| p * q).sum()
+}
+
+/// Merges the two groups whose members are most alike on average, until no
+/// two are `SAME_SPEAKER` alike.
+fn link(v: &[&[f32]]) -> Vec<Vec<usize>> {
+    let n = v.len();
+    let mut sim: Vec<f32> = (0..n * n).map(|k| dot(v[k / n], v[k % n])).collect();
+    let mut groups: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    let mut live: Vec<usize> = (0..n).collect();
+    loop {
+        let mut best = (SAME_SPEAKER, None);
+        for (x, &g) in live.iter().enumerate() {
+            for &h in &live[x + 1..] {
+                if sim[g * n + h] > best.0 {
+                    best = (sim[g * n + h], Some((g, h)));
+                }
+            }
+        }
+        let Some((g, h)) = best.1 else { break };
+        // The merged group's average follows from the two it replaces.
+        let (a, b) = (groups[g].len() as f32, groups[h].len() as f32);
+        for &k in &live {
+            let s = (a * sim[g * n + k] + b * sim[h * n + k]) / (a + b);
+            sim[g * n + k] = s;
+            sim[k * n + g] = s;
+        }
+        let moved = std::mem::take(&mut groups[h]);
+        groups[g].extend(moved);
+        live.retain(|&k| k != h);
+    }
+    groups.retain(|g| !g.is_empty());
+    groups
+}
+
+/// A group's average voice, each line weighted by the audio it came from.
+fn centre(g: &[usize], v: &[&[f32]], w: &[f32]) -> Vec<f32> {
+    let mut c = vec![0.0; v[g[0]].len()];
+    for &i in g {
+        c.iter_mut().zip(v[i]).for_each(|(c, x)| *c += w[i] * x);
+    }
+    let norm = c.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+    c.iter_mut().for_each(|x| *x /= norm);
+    c
+}
+
+/// Gives the lines of groups with too little speech to the group whose
+/// average voice each sounds most like.
+fn absorb_small(groups: &mut Vec<Vec<usize>>, v: &[&[f32]], w: &[f32]) {
+    let min = MIN_SPEECH_MS.min(MIN_SHARE * w.iter().sum::<f32>());
+    let (big, small): (Vec<_>, Vec<_>) =
+        std::mem::take(groups).into_iter().partition(|g| g.iter().map(|&i| w[i]).sum::<f32>() >= min);
+    if big.is_empty() {
+        *groups = small;
+        return;
+    }
+    let centres: Vec<Vec<f32>> = big.iter().map(|g| centre(g, v, w)).collect();
+    *groups = big;
+    for i in small.into_iter().flatten() {
+        let near = (0..centres.len()).max_by(|&a, &b| dot(v[i], &centres[a]).total_cmp(&dot(v[i], &centres[b])));
+        groups[near.unwrap()].push(i);
+    }
+}
+
+/// Merges the two groups with the most alike average voices, until no two
+/// are `SAME_VOICE` alike.
+fn merge_alike(groups: &mut Vec<Vec<usize>>, v: &[&[f32]], w: &[f32]) {
+    loop {
+        let centres: Vec<Vec<f32>> = groups.iter().map(|g| centre(g, v, w)).collect();
+        let mut best = (SAME_VOICE, None);
+        for g in 0..groups.len() {
+            for h in g + 1..groups.len() {
+                let s = dot(&centres[g], &centres[h]);
+                if s > best.0 {
+                    best = (s, Some((g, h)));
+                }
+            }
+        }
+        let Some((g, h)) = best.1 else { return };
+        let moved = groups.remove(h);
+        groups[g].extend(moved);
+    }
 }
 
 const N_MELS: usize = 80;
@@ -263,15 +342,46 @@ impl Fbank {
 mod tests {
     use super::*;
 
-    fn v(x: &[f32]) -> Option<Vec<f32>> {
+    /// A fingerprint pointing along `x`, from a 3 s line.
+    fn v(x: &[f32]) -> Option<(Vec<f32>, f32)> {
         let n = x.iter().map(|a| a * a).sum::<f32>().sqrt();
-        Some(x.iter().map(|a| a / n).collect())
+        Some((x.iter().map(|a| a / n).collect(), 3_000.0))
+    }
+
+    /// `voice` plus a direction no other line has, as each real line carries
+    /// noise of its own.
+    fn noisy(voice: &[f32], own: usize, amount: f32) -> Option<(Vec<f32>, f32)> {
+        let mut x = vec![0.0; 64];
+        x[..voice.len()].copy_from_slice(voice);
+        x[own] = amount;
+        v(&x)
     }
 
     #[test]
     fn groups_alike_voices_in_order_of_appearance() {
         let embs = vec![v(&[1.0, 0.1]), v(&[0.1, 1.0]), None, v(&[0.9, 0.2]), v(&[0.2, 0.9])];
         assert_eq!(cluster(&embs), vec![0, 1, 1, 0, 1]);
+    }
+
+    #[test]
+    fn a_stray_line_joins_the_closest_voice() {
+        let mut embs: Vec<_> = (0..40).map(|i| v(if i % 2 == 0 { &[1.0, 0.0, 0.0] } else { &[0.0, 1.0, 0.0] })).collect();
+        // Less than SAME_SPEAKER alike to either voice, but nearer the first.
+        embs.insert(7, v(&[0.45, 0.1, 0.88]));
+        let labels = cluster(&embs);
+        assert_eq!(labels.iter().max(), Some(&1));
+        assert_eq!(labels[7], 0);
+    }
+
+    #[test]
+    fn one_voice_split_line_by_line_is_merged_on_average() {
+        // Two takes of one voice and another voice. Lines of the two takes are
+        // 0.47 alike, their averages 0.75.
+        let voices: [&[f32]; 3] = [&[1.0, 0.0, 0.0], &[0.8, 0.6, 0.0], &[0.0, 0.0, 1.0]];
+        let embs: Vec<_> = (0..30).map(|i| noisy(voices[i % 3], 3 + i, 0.7f32.sqrt())).collect();
+        let labels = cluster(&embs);
+        assert_eq!(labels.iter().max(), Some(&1));
+        assert!((0..30).all(|i| (labels[i] == labels[0]) == (i % 3 != 2)));
     }
 
     #[test]
