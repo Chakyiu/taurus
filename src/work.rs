@@ -99,6 +99,13 @@ pub enum Bg {
         version: String,
         result: Result<(), String>,
     },
+    /// Which lines of a correction are being read now, 1-based and inclusive.
+    Fixing {
+        pid: String,
+        job: u64,
+        from: usize,
+        to: usize,
+    },
     /// Each line's index, the words sent, and the words that came back.
     Fixes {
         pid: String,
@@ -258,6 +265,15 @@ impl Workbench {
                 }
             }
             Bg::UpdateInstalled { version, result } => self.update_installed(version, result, cx),
+            Bg::Fixing { pid, job, from, to } => {
+                if let Some(j) = self
+                    .correcting
+                    .as_mut()
+                    .filter(|j| j.id == job && j.pid == pid)
+                {
+                    j.span = Some((from, to));
+                }
+            }
             Bg::Fixes { pid, job, lines } => self.fixes_arrived(&pid, job, lines),
             Bg::FixesDone { pid, job } => self.fixes_done(&pid, job, cx),
             Bg::FixesFailed { pid, job, error } => self.fixes_failed(&pid, job, error, cx),
@@ -2403,27 +2419,52 @@ impl Workbench {
             pid: pid.clone(),
             done: 0,
             total: idx.len(),
+            span: None,
             cancel: cancel.clone(),
         });
         let tx = self.bg_tx.clone();
+        let plain = AtomicBool::new(false);
         spawn("correct", move || {
-            for start in (0..lines.len()).step_by(mt::BATCH) {
+            for start in (0..lines.len()).step_by(mt::CORRECT_BATCH) {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let range = start..(start + mt::BATCH).min(lines.len());
-                match mt::correct(&cfg, &lang, &about, &terms, &lines, range.clone(), &cancel) {
-                    Ok(out) => {
-                        let fixes = range
-                            .zip(out)
-                            .map(|(k, fixed)| (idx[k], lines[k].clone(), fixed))
-                            .collect();
-                        let _ = tx.send(Bg::Fixes {
-                            pid: pid.clone(),
-                            job,
-                            lines: fixes,
-                        });
-                    }
+                let end = (start + mt::CORRECT_BATCH).min(lines.len());
+                let _ = tx.send(Bg::Fixing {
+                    pid: pid.clone(),
+                    job,
+                    from: start + 1,
+                    to: end,
+                });
+                let tx_span = tx.clone();
+                let pid_span = pid.clone();
+                let mut on_span = |at: usize, fixed: &[String]| {
+                    let fixes = fixed
+                        .iter()
+                        .enumerate()
+                        .map(|(i, text)| {
+                            let k = at + i;
+                            (idx[k], lines[k].clone(), text.clone())
+                        })
+                        .collect();
+                    let _ = tx_span.send(Bg::Fixes {
+                        pid: pid_span.clone(),
+                        job,
+                        lines: fixes,
+                    });
+                };
+                match mt::correct(
+                    &cfg,
+                    &lang,
+                    &about,
+                    &terms,
+                    &lines,
+                    start..end,
+                    &cancel,
+                    &plain,
+                    &mut on_span,
+                ) {
+                    Ok(_) => {}
                     Err(_) if cancel.load(Ordering::Relaxed) => return,
                     Err(e) => {
                         let _ = tx.send(Bg::FixesFailed {

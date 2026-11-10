@@ -422,6 +422,9 @@ pub struct CorrectJob {
     pub pid: String,
     pub done: usize,
     pub total: usize,
+    /// The lines in flight, as 1-based indexes into this run, so the strip
+    /// can show which batch is being read while `done` waits for it.
+    pub span: Option<(usize, usize)>,
     pub(crate) cancel: Arc<AtomicBool>,
 }
 

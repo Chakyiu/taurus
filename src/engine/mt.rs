@@ -22,6 +22,11 @@ pub struct MtConfig {
 
 pub const BATCH: usize = 24;
 
+/// Lines per correction request. Smaller than a translation batch: a proofread
+/// is one string per line, and a reasoning model otherwise sits on a large
+/// batch while the count on screen does not move.
+pub const CORRECT_BATCH: usize = 8;
+
 /// The glossary entries that apply to one project, written as instructions.
 pub fn glossary_rules(terms: &[&Term]) -> Vec<String> {
     terms
@@ -122,9 +127,37 @@ fn chat(cfg: &MtConfig, body: &Value) -> Result<String> {
 
 /// Streams the reply, so it needs no deadline and can still be stopped:
 /// dropping the stream closes the connection, which stops the server too.
-fn chat_streamed(cfg: &MtConfig, mut body: Value, cancel: &AtomicBool) -> Result<String> {
+fn chat_streamed(cfg: &MtConfig, body: Value, cancel: &AtomicBool) -> Result<String> {
+    chat_with(untimed_agent(), cfg, body, cancel)
+}
+
+/// A correction request. The body has a deadline, and a read that goes quiet
+/// gives up, so one batch cannot hold the count still forever.
+fn chat_bounded(
+    cfg: &MtConfig,
+    body: Value,
+    cancel: &AtomicBool,
+    budget: Duration,
+) -> Result<String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(budget))
+        .timeout_per_read(Some(Duration::from_secs(90)))
+        .timeout_recv_body(Some(budget))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    chat_with(agent, cfg, body, cancel)
+}
+
+fn chat_with(
+    agent: ureq::Agent,
+    cfg: &MtConfig,
+    mut body: Value,
+    cancel: &AtomicBool,
+) -> Result<String> {
     body["stream"] = json!(true);
-    let mut resp = post(untimed_agent(), cfg, &body)?;
+    let mut resp = post(agent, cfg, &body)?;
     read_reply(BufReader::new(resp.body_mut().as_reader()), cancel)
 }
 
@@ -239,6 +272,11 @@ const CONTEXT_LINES: usize = 3;
 /// language name). The lines around the range go along as context. `about`
 /// says what the recording is about, and `terms` are names and words spelled
 /// the right way. Every line comes back, unchanged when nothing was wrong.
+///
+/// `on_span` is called as soon as a piece is settled, including when a batch
+/// had to be split, so the count can move before the whole range returns.
+/// `plain` is set once a server rejects the `think` field, and later requests
+/// omit it.
 pub fn correct(
     cfg: &MtConfig,
     lang: &str,
@@ -247,9 +285,14 @@ pub fn correct(
     lines: &[String],
     range: Range<usize>,
     cancel: &AtomicBool,
+    plain: &AtomicBool,
+    on_span: &mut dyn FnMut(usize, &[String]),
 ) -> Result<Vec<String>> {
     if range.is_empty() {
         return Ok(Vec::new());
+    }
+    if cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
     }
     let n = range.len();
     let mut system = format!(
@@ -257,6 +300,7 @@ pub fn correct(
          - Fix only what the recognizer misheard: wrong words that sound like the right ones, misspelled names and terms, wrong characters.\n\
          - Keep everything else exactly as it is: the wording, the word order, filler words, line breaks and punctuation.\n\
          - Never translate, rephrase, summarize, merge, split or reorder lines. When nothing in a line is misheard, return it unchanged.\n\
+         - Answer directly. Do not reason, explain or write a think block.\n\
          - Reply with JSON only, shaped {{\"t\": [\"...\"]}}, holding exactly {n} strings, one for each input line, in order."
     );
     if !about.trim().is_empty() {
@@ -276,34 +320,112 @@ pub fn correct(
         "context_before": &lines[range.start.saturating_sub(CONTEXT_LINES)..range.start],
         "context_after": &lines[range.end..(range.end + CONTEXT_LINES).min(lines.len())],
     });
-    let body = json!({
+    // `/no_think` turns reasoning off in Qwen3's chat template. Other models
+    // see it as a note and are told to ignore it.
+    let user = format!("/no_think\n{}", user);
+    let mut body = json!({
         "model": cfg.model,
         "temperature": 0.1,
+        "think": false,
         "messages": [
             { "role": "system", "content": system },
-            { "role": "user", "content": user.to_string() },
+            { "role": "user", "content": user },
         ],
     });
-    let content = chat_streamed(cfg, body, cancel)?;
+    if plain.load(Ordering::Relaxed) {
+        body.as_object_mut().unwrap().remove("think");
+    }
+    // Long enough for a slow local model to prefill, short enough that a
+    // batch which never finishes is split instead of pinning the count.
+    let budget = Duration::from_secs(60 + n as u64 * 15);
+    let fetched = match chat_bounded(cfg, body.clone(), cancel, budget) {
+        Err(e) if !plain.load(Ordering::Relaxed) && rejects_think(&e) => {
+            plain.store(true, Ordering::Relaxed);
+            body.as_object_mut().unwrap().remove("think");
+            chat_bounded(cfg, body, cancel, budget)
+        }
+        other => other,
+    };
+    let content = match fetched {
+        Ok(content) => content,
+        Err(e) if cancel.load(Ordering::Relaxed) => return Err(e),
+        Err(e) if n > 1 && slow_reply(&e) => {
+            return correct_halves(
+                cfg, lang, about, terms, lines, range, cancel, plain, on_span,
+            );
+        }
+        Err(e) if n == 1 && slow_reply(&e) => {
+            let out = lines[range.clone()].to_vec();
+            on_span(range.start, &out);
+            return Ok(out);
+        }
+        Err(e) => return Err(e),
+    };
     match json_lines(&content, n) {
-        Ok(out) => Ok(out),
-        // Smaller models sometimes merge or drop a line; halves line up more often.
-        Err(_) if n > 1 => {
-            let mid = range.start + n / 2;
-            let mut out = correct(cfg, lang, about, terms, lines, range.start..mid, cancel)?;
-            out.extend(correct(
-                cfg,
-                lang,
-                about,
-                terms,
-                lines,
-                mid..range.end,
-                cancel,
-            )?);
+        Ok(out) => {
+            on_span(range.start, &out);
             Ok(out)
         }
-        Err(_) => Ok(lines[range].to_vec()),
+        // Smaller models sometimes merge or drop a line; halves line up more often.
+        Err(_) if n > 1 => correct_halves(
+            cfg, lang, about, terms, lines, range, cancel, plain, on_span,
+        ),
+        Err(_) => {
+            let out = lines[range.clone()].to_vec();
+            on_span(range.start, &out);
+            Ok(out)
+        }
     }
+}
+
+fn correct_halves(
+    cfg: &MtConfig,
+    lang: &str,
+    about: &str,
+    terms: &[String],
+    lines: &[String],
+    range: Range<usize>,
+    cancel: &AtomicBool,
+    plain: &AtomicBool,
+    on_span: &mut dyn FnMut(usize, &[String]),
+) -> Result<Vec<String>> {
+    let mid = range.start + range.len() / 2;
+    let mut out = correct(
+        cfg,
+        lang,
+        about,
+        terms,
+        lines,
+        range.start..mid,
+        cancel,
+        plain,
+        on_span,
+    )?;
+    out.extend(correct(
+        cfg,
+        lang,
+        about,
+        terms,
+        lines,
+        mid..range.end,
+        cancel,
+        plain,
+        on_span,
+    )?);
+    Ok(out)
+}
+
+/// The server refused the `think` field. OpenAI does; Ollama accepts it.
+fn rejects_think(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}").to_ascii_lowercase();
+    s.contains("400") && s.contains("think")
+}
+
+/// The reply stalled or arrived incomplete. A smaller piece may still land.
+/// A server that never answered is not this: that error stops the job.
+fn slow_reply(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}").to_ascii_lowercase();
+    s.contains("timeout") || s.contains("reading the reply")
 }
 
 /// How much of a transcript one request should carry. Longer transcripts are

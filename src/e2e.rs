@@ -385,8 +385,9 @@ fn proofreading_server() -> (String, Arc<std::sync::Mutex<Vec<(String, usize)>>>
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
+            let raw = req["messages"][1]["content"].as_str().unwrap();
             let user: serde_json::Value =
-                serde_json::from_str(req["messages"][1]["content"].as_str().unwrap()).unwrap();
+                serde_json::from_str(raw.trim_start_matches("/no_think").trim()).unwrap();
             let mut out: Vec<String> = user["lines"]
                 .as_array()
                 .unwrap()
@@ -446,6 +447,8 @@ fn e2e_corrects_misheard_words() {
         &lines,
         0..lines.len(),
         &AtomicBool::new(false),
+        &AtomicBool::new(false),
+        &mut |_, _| {},
     )
     .unwrap();
     println!("{out:#?}");

@@ -1149,7 +1149,12 @@ impl Workbench {
         let note = self
             .correcting
             .as_ref()
-            .map(|j| format!("{} of {} lines", j.done, j.total))
+            .map(|j| match j.span {
+                Some((from, to)) if j.done < j.total => {
+                    format!("{} of {} lines, reading {from}–{to}", j.done, j.total)
+                }
+                _ => format!("{} of {} lines", j.done, j.total),
+            })
             .unwrap_or_default();
         self.strip(bp)
             .child(Self::strip_title("Correcting the lines"))
