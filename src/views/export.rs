@@ -13,20 +13,30 @@ use crate::ui::*;
 impl Workbench {
     pub(crate) fn export_body(&self, built: Option<&Built>, cx: &mut Context<Self>) -> Div {
         let e = &self.exp;
-        let formats = segmented().children(Format::ALL.iter().map(|f| {
-            let f = *f;
-            seg_button(
-                SharedString::from(format!("fmt-{f:?}")),
-                None,
-                &f.ext().to_uppercase(),
-                e.format == f,
-                false,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.exp.format = f;
-                cx.notify();
-            }))
-        }));
+        let has_video = self.current().is_some_and(|p| self.video_file(p).is_some());
+        let formats = segmented().children(
+            Format::ALL
+                .iter()
+                .filter(|f| has_video || **f != Format::Video)
+                .map(|f| {
+                    let f = *f;
+                    let label = match f {
+                        Format::Video => "Video".to_string(),
+                        f => f.ext().to_uppercase(),
+                    };
+                    seg_button(
+                        SharedString::from(format!("fmt-{f:?}")),
+                        None,
+                        &label,
+                        e.format == f,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.exp.format = f;
+                        cx.notify();
+                    }))
+                }),
+        );
         let layouts = segmented()
             .flex_wrap()
             .children(Layout::ALL.iter().map(|l| {
@@ -76,7 +86,10 @@ impl Workbench {
         ];
         let toggles: Vec<_> = options
             .into_iter()
-            .filter(|(id, ..)| speakers || *id != "exp-speakers")
+            .filter(|(id, ..)| {
+                (speakers || *id != "exp-speakers")
+                    && (e.format != Format::Video || *id != "exp-bom")
+            })
             .map(|(id, on, text, flip)| {
                 checkbox_row(id, on, text).on_click(cx.listener(move |this, _, _, cx| {
                     flip(&mut this.exp);
@@ -91,7 +104,13 @@ impl Workbench {
 
         col()
             .gap(px(18.))
-            .child(field("Format", formats))
+            .child(
+                field("Format", formats).when(e.format == Format::Video, |d| {
+                    d.child(hint(
+                        "Burns these lines into a new video. The original file is left as it is.",
+                    ))
+                }),
+            )
             .when(translated, |d| {
                 d.child(field(
                     "Lines",

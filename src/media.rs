@@ -1,9 +1,11 @@
 //! Reading videos through ffprobe and ffmpeg. Apps started from Finder do not
 //! inherit the shell's PATH, so the usual Homebrew locations are searched too.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
@@ -221,6 +223,223 @@ fn first_line(bytes: &[u8]) -> Option<String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(String::from)
+}
+
+/// Burns `script` (an ASS document) into a new video at `dest`. The source
+/// file is only read. Audio is copied. `progress` receives 0–1 from ffmpeg's
+/// `out_time_us` when `duration_ms` is known. A set `cancel` flag kills the
+/// encode and removes the partial file.
+pub fn burn_subtitles(
+    video: &Path,
+    script: &str,
+    dest: &Path,
+    duration_ms: i64,
+    cancel: &Arc<AtomicBool>,
+    mut progress: impl FnMut(f32),
+) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
+    let ffmpeg = need("ffmpeg")?;
+    let ass_path = std::env::temp_dir().join(format!(
+        "taurus-{}-{}.ass",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&ass_path, script.as_bytes()).context("writing the subtitle script")?;
+    let _ass = Scratch::remove(ass_path.clone());
+
+    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let tmp = dest.with_file_name(format!(
+        ".{}.part",
+        dest.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("video.mp4")
+    ));
+    let mut partial = Scratch::remove(tmp.clone());
+
+    let filter = format!(
+        "subtitles='{}':charenc=UTF-8:fontsdir='{}'",
+        filter_escape(&ass_path),
+        filter_escape(Path::new("/System/Library/Fonts"))
+    );
+    let mut child = Command::new(&ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .arg(video)
+        .args(["-vf"])
+        .arg(&filter)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ])
+        .arg(&tmp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg")?;
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let finished2 = Arc::clone(&finished);
+    let cancel2 = Arc::clone(cancel);
+    let pid = child.id();
+    std::thread::spawn(move || {
+        while !finished2.load(Ordering::Relaxed) {
+            if cancel2.load(Ordering::Relaxed) {
+                let _ = Command::new("/bin/kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+    let _stop_watch = Flag(finished);
+
+    let stderr = child.stderr.take();
+    let err_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let mut reader = BufReader::new(child.stdout.take().context("ffmpeg progress")?);
+    let mut line = String::new();
+    let mut last_pct = -1.0f32;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = err_task.join();
+            bail!("cancelled");
+        }
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim();
+                let us = trimmed
+                    .strip_prefix("out_time_us=")
+                    .and_then(|v| v.parse::<i64>().ok());
+                if let Some(us) = us
+                    && duration_ms > 0
+                {
+                    let pct = (us as f32 / (duration_ms as f32 * 1000.0)).clamp(0.0, 0.99);
+                    if pct - last_pct >= 0.01 {
+                        last_pct = pct;
+                        progress(pct);
+                    }
+                }
+            }
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                let _ = child.wait();
+                let _ = err_task.join();
+                bail!("cancelled");
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = err_task.join();
+                return Err(e).context("reading ffmpeg progress");
+            }
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = err_task.join();
+        bail!("cancelled");
+    }
+    let status = child.wait().context("waiting for ffmpeg")?;
+    let err = err_task.join().unwrap_or_default();
+    if cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
+    if !status.success() {
+        bail!(
+            "{}",
+            last_line(&err).unwrap_or_else(|| "ffmpeg could not write the video".into())
+        );
+    }
+    std::fs::rename(&tmp, dest).context("saving the video")?;
+    partial.keep = true;
+    progress(1.0);
+    Ok(())
+}
+
+/// Characters that end a filter option or a filtergraph. The path is also
+/// wrapped in single quotes.
+fn filter_escape(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.to_string_lossy().chars() {
+        if matches!(c, '\\' | ':' | '\'' | ',' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn last_line(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .map(str::to_string)
+}
+
+/// Deletes `path` on drop unless `keep` is set after a successful rename.
+struct Scratch {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Scratch {
+    fn remove(path: PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct Flag(Arc<AtomicBool>);
+
+impl Drop for Flag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn file_size_label(path: &Path) -> String {

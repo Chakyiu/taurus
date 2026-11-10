@@ -15,6 +15,7 @@ use gpui_component::input::{Input, InputState};
 use crate::app::*;
 use crate::data::*;
 use crate::engine::AsrChoice;
+use crate::engine::mt::Think;
 use crate::icons::{APP_ICON, Icon, icon};
 use crate::theme::{self as t, weight};
 use crate::ui::*;
@@ -548,6 +549,38 @@ impl Workbench {
 
     // ─── dialogs ───────────────────────────────────────────
 
+    fn reasoning_field(
+        &self,
+        id: &'static str,
+        current: Think,
+        summary: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let chips = segmented()
+            .flex_wrap()
+            .children(Think::ALL.iter().map(|level| {
+                let level = *level;
+                seg_button(
+                    SharedString::from(format!("{id}-{:?}", level)),
+                    None,
+                    level.label(),
+                    current == level,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if summary {
+                        this.set_summary_think(level, cx);
+                    } else {
+                        this.set_correct_think(level, cx);
+                    }
+                }))
+            }));
+        field(
+            "Reasoning",
+            col().gap(px(6.)).child(chips).child(hint(current.note())),
+        )
+    }
+
     fn render_dialog(
         &self,
         bp: Bp,
@@ -560,7 +593,7 @@ impl Workbench {
             Dialog::Term { .. } => 520.,
             Dialog::Capture | Dialog::Extract | Dialog::Export => 480.,
             Dialog::Confirm { .. } | Dialog::Rename { .. } | Dialog::Translate => 400.,
-            Dialog::Summarize { .. } | Dialog::About | Dialog::Correct => 440.,
+            Dialog::Summarize { .. } | Dialog::About | Dialog::Correct { .. } => 440.,
         };
         let max_w = px(f32::min(width, bp.w - 32.));
         let mut extra: Option<AnyElement> = None;
@@ -685,6 +718,7 @@ impl Workbench {
             }
             Dialog::Summarize {
                 long,
+                think,
                 custom,
                 looking,
                 lookup_error,
@@ -712,7 +746,7 @@ impl Workbench {
                                 .text_size(px(15.))
                                 .text_color(t::text_2())
                                 .line_height(relative(1.6))
-                                .child("An account of these lines. Choose the language, the model and how long it should be."),
+                                .child("An account of these lines. Choose the language, the model, the length and how much it should reason."),
                         )
                         .child(field("Language", self.render_select(Sel::SumLang, px(220.), false, cx)))
                         .child(field("Model", self.render_select(Sel::SumModel, px(220.), false, cx)))
@@ -741,6 +775,7 @@ impl Workbench {
                                     ),
                                 ),
                         ))
+                        .child(self.reasoning_field("sum-think", *think, true, cx))
                         .child(hint(format!("Sent to {endpoint}. The endpoint and its key are set in Engines.")))
                         .when(!ready, |d| {
                             d.child(
@@ -797,13 +832,16 @@ impl Workbench {
             Dialog::Export => {
                 let built = self.build_export();
                 let can = built.as_ref().is_some_and(|b| b.count > 0);
-                extra = Some(
-                    button("exp-copy", Btn::Ghost, Some(Icon::Copy), Some("Copy"), !can)
-                        .when(can, |d| {
-                            d.on_click(cx.listener(|this, _, _, cx| this.copy_export(cx)))
-                        })
-                        .into_any_element(),
-                );
+                let video = self.exp.format == Format::Video;
+                if !video {
+                    extra = Some(
+                        button("exp-copy", Btn::Ghost, Some(Icon::Copy), Some("Copy"), !can)
+                            .when(can, |d| {
+                                d.on_click(cx.listener(|this, _, _, cx| this.copy_export(cx)))
+                            })
+                            .into_any_element(),
+                    );
+                }
                 (
                     row()
                         .gap(px(10.))
@@ -814,7 +852,11 @@ impl Workbench {
                         "dlg-ok",
                         Btn::Primary,
                         Some(Icon::Download),
-                        Some("Save file…"),
+                        Some(if video {
+                            "Save video…"
+                        } else {
+                            "Save file…"
+                        }),
                         !can,
                     )
                     .when(can, |d| {
@@ -839,7 +881,8 @@ impl Workbench {
                 self.about_body(cx),
                 self.update_action(cx),
             ),
-            Dialog::Correct => {
+            Dialog::Correct { think } => {
+                let think = *think;
                 let ready = self.settings.mt_ready();
                 let (lang, translated) = self
                     .current()
@@ -876,6 +919,7 @@ impl Workbench {
                         .child(hint(
                             "The topic and the names that come up help the most. Glossary terms count as correct spellings.",
                         ))
+                        .child(self.reasoning_field("fix-think", think, false, cx))
                         .child(hint(format!("Sent to {endpoint} with {model}. Both are set in Engines.")))
                         .when(!ready, |d| {
                             d.child(

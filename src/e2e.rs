@@ -358,6 +358,7 @@ fn e2e_stops_a_summary_mid_reply() {
         false,
         &[],
         "Good morning.",
+        mt::Think::Off,
         |_, _| {},
         &cancel,
     );
@@ -385,9 +386,13 @@ fn proofreading_server() -> (String, Arc<std::sync::Mutex<Vec<(String, usize)>>>
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let raw = req["messages"][1]["content"].as_str().unwrap();
-            let user: serde_json::Value =
-                serde_json::from_str(raw.trim_start_matches("/no_think").trim()).unwrap();
+            let raw = req["messages"][1]["content"].as_str().unwrap().trim();
+            let raw = raw
+                .strip_prefix("/no_think")
+                .or_else(|| raw.strip_prefix("/think"))
+                .unwrap_or(raw)
+                .trim();
+            let user: serde_json::Value = serde_json::from_str(raw).unwrap();
             let mut out: Vec<String> = user["lines"]
                 .as_array()
                 .unwrap()
@@ -446,6 +451,7 @@ fn e2e_corrects_misheard_words() {
         &terms,
         &lines,
         0..lines.len(),
+        mt::Think::Off,
         &AtomicBool::new(false),
         &AtomicBool::new(false),
         &mut |_, _| {},

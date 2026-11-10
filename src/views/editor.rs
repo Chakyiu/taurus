@@ -136,6 +136,10 @@ impl Workbench {
             Some(self.line_list(bp, capturing, window, cx))
         };
         screen()
+            .when(
+                self.video_export.as_ref().is_some_and(|j| j.pid == pid),
+                |d| d.child(self.video_export_strip(bp, cx)),
+            )
             .children(strip)
             .when(!fill && !p.segs.is_empty() && !capturing, |d| {
                 d.child(self.toolbar(bp, cx))
@@ -1170,6 +1174,55 @@ impl Workbench {
                 button("fix-stop", Btn::Quiet, None, Some("Stop"), false)
                     .on_click(cx.listener(|this, _, _, cx| this.stop_correcting(cx))),
             )
+            .into_any_element()
+    }
+
+    fn video_export_strip(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        let job = self.video_export.as_ref();
+        let stopping = job.is_some_and(|j| j.stopping);
+        let pct = job.map(|j| j.pct).unwrap_or(0.0);
+        let note = if stopping {
+            "Stopping…".to_string()
+        } else if pct > 0.0 {
+            format!("{}%", (pct * 100.0).round() as u32)
+        } else {
+            "Writing…".to_string()
+        };
+        self.strip(bp)
+            .items_center()
+            .child(Self::strip_title("Writing the video"))
+            .child(
+                mono(div())
+                    .flex_none()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(note),
+            )
+            .child(div().flex_1().min_w(px(60.)).flex().items_center().child(
+                if pct > 0.0 && !stopping {
+                    div()
+                        .w_full()
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(t::surface_3())
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(pct.clamp(0., 1.)))
+                                .rounded_full()
+                                .bg(t::accent()),
+                        )
+                        .into_any_element()
+                } else {
+                    running_bar("vid-run").into_any_element()
+                },
+            ))
+            .when(!stopping, |d| {
+                d.child(
+                    button("vid-stop", Btn::Quiet, None, Some("Stop"), false)
+                        .on_click(cx.listener(|this, _, _, cx| this.stop_video_export(cx))),
+                )
+            })
             .into_any_element()
     }
 

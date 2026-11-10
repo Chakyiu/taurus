@@ -121,6 +121,15 @@ pub enum Bg {
         job: u64,
         error: String,
     },
+    VideoProgress {
+        pct: f32,
+    },
+    VideoReady {
+        path: PathBuf,
+    },
+    VideoFailed {
+        error: String,
+    },
 }
 
 pub struct SpeakerJob {
@@ -141,6 +150,16 @@ fn plural(n: usize, one: &str, many: &str) -> String {
         format!("1 {one}")
     } else {
         format!("{n} {many}")
+    }
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -277,6 +296,13 @@ impl Workbench {
             Bg::Fixes { pid, job, lines } => self.fixes_arrived(&pid, job, lines),
             Bg::FixesDone { pid, job } => self.fixes_done(&pid, job, cx),
             Bg::FixesFailed { pid, job, error } => self.fixes_failed(&pid, job, error, cx),
+            Bg::VideoProgress { pct } => {
+                if let Some(job) = self.video_export.as_mut() {
+                    job.pct = pct;
+                }
+            }
+            Bg::VideoReady { path } => self.video_ready(path, cx),
+            Bg::VideoFailed { error } => self.video_failed(error, cx),
             Bg::AsrTest(r) => {
                 if let Some(Dialog::Engines {
                     asr_test,
@@ -2152,6 +2178,7 @@ impl Workbench {
             self.settings.mt_model.trim().to_string()
         };
         let long = self.settings.summary_long || p.summary_long;
+        let think = self.settings.summary_think;
         self.sum_model
             .update(cx, |s, cx| s.set_value(model.clone(), window, cx));
         self.open_select = None;
@@ -2160,6 +2187,7 @@ impl Workbench {
             lang,
             model: model.clone(),
             long,
+            think,
             models: vec![model],
             custom: false,
             looking: ready,
@@ -2183,6 +2211,20 @@ impl Workbench {
         cx.notify();
     }
 
+    pub fn set_summary_think(&mut self, think: mt::Think, cx: &mut Context<Self>) {
+        if let Some(Dialog::Summarize { think: slot, .. }) = &mut self.dialog {
+            *slot = think;
+        }
+        cx.notify();
+    }
+
+    pub fn set_correct_think(&mut self, think: mt::Think, cx: &mut Context<Self>) {
+        if let Some(Dialog::Correct { think: slot }) = &mut self.dialog {
+            *slot = think;
+        }
+        cx.notify();
+    }
+
     pub fn summarize_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.require_endpoint("A summary", cx) {
             return;
@@ -2191,13 +2233,15 @@ impl Workbench {
             lang,
             model,
             long,
+            think,
             custom,
             ..
         }) = &self.dialog
         else {
             return;
         };
-        let (lang, mut model, long, custom) = (lang.clone(), model.clone(), *long, *custom);
+        let (lang, mut model, long, think, custom) =
+            (lang.clone(), model.clone(), *long, *think, *custom);
         if custom {
             model = self.sum_model.read(cx).value().trim().to_string();
         }
@@ -2213,14 +2257,22 @@ impl Workbench {
         self.settings.summary_lang = lang.clone();
         self.settings.summary_model = model.clone();
         self.settings.summary_long = long;
+        self.settings.summary_think = think;
         if let Err(e) = store::save_settings(&self.settings) {
             eprintln!("saving settings: {e:#}");
         }
         self.close_dialog(window, cx);
-        self.start_summary(lang, model, long, cx);
+        self.start_summary(lang, model, long, think, cx);
     }
 
-    fn start_summary(&mut self, lang: String, model: String, long: bool, cx: &mut Context<Self>) {
+    fn start_summary(
+        &mut self,
+        lang: String,
+        model: String,
+        long: bool,
+        think: mt::Think,
+        cx: &mut Context<Self>,
+    ) {
         let Some(p) = self.current() else { return };
         let transcript = p.transcript();
         if transcript.trim().is_empty() {
@@ -2266,6 +2318,7 @@ impl Workbench {
                 long,
                 &rules,
                 &transcript,
+                think,
                 progress,
                 &cancel,
             );
@@ -2364,13 +2417,20 @@ impl Workbench {
         self.correct_about
             .update(cx, |s, cx| s.set_value(about, window, cx));
         self.open_select = None;
-        self.dialog = Some(Dialog::Correct);
+        self.dialog = Some(Dialog::Correct {
+            think: self.settings.correct_think,
+        });
         cx.notify();
     }
 
     pub fn correct_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.dialog, Some(Dialog::Correct)) || !self.require_endpoint("Correction", cx)
-        {
+        let Some(think) = self.dialog.as_ref().and_then(|d| match d {
+            Dialog::Correct { think } => Some(*think),
+            _ => None,
+        }) else {
+            return;
+        };
+        if !self.require_endpoint("Correction", cx) {
             return;
         }
         let Some(pid) = self.project_id.clone() else {
@@ -2380,11 +2440,21 @@ impl Workbench {
         if let Some(p) = self.project_mut(&pid) {
             p.about = about.clone();
         }
+        self.settings.correct_think = think;
+        if let Err(e) = store::save_settings(&self.settings) {
+            eprintln!("saving settings: {e:#}");
+        }
         self.close_dialog(window, cx);
-        self.start_correcting(pid, about, cx);
+        self.start_correcting(pid, about, think, cx);
     }
 
-    fn start_correcting(&mut self, pid: String, about: String, cx: &mut Context<Self>) {
+    fn start_correcting(
+        &mut self,
+        pid: String,
+        about: String,
+        think: mt::Think,
+        cx: &mut Context<Self>,
+    ) {
         let Some(p) = self.project(&pid) else { return };
         let idx: Vec<usize> = (0..p.segs.len())
             .filter(|&i| !p.segs[i].orig.trim().is_empty())
@@ -2460,6 +2530,7 @@ impl Workbench {
                     &terms,
                     &lines,
                     start..end,
+                    think,
                     &cancel,
                     &plain,
                     &mut on_span,
@@ -2548,6 +2619,136 @@ impl Workbench {
             if let Some(p) = self.project_mut(&job.pid) {
                 settle_status(&g, p);
             }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn launch_video_export(
+        &mut self,
+        pid: String,
+        src: PathBuf,
+        dest: PathBuf,
+        script: String,
+        cues: usize,
+        layout: Layout,
+        cx: &mut Context<Self>,
+    ) {
+        if self.video_export.is_some() {
+            self.toast(
+                "A video is already being written.",
+                ToastKind::Bad,
+                None,
+                cx,
+            );
+            return;
+        }
+        if same_file(&dest, &src) {
+            self.toast(
+                "Choose another file. This export writes a new video and leaves the original in place.",
+                ToastKind::Bad,
+                None,
+                cx,
+            );
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.video_export = Some(VideoExport {
+            pct: 0.0,
+            pid,
+            cues,
+            layout,
+            stopping: false,
+            cancel: Arc::clone(&cancel),
+        });
+        self.dialog = None;
+        let tx = self.bg_tx.clone();
+        spawn("video", move || {
+            let duration_ms = media::probe(&src).map(|p| p.duration_ms).unwrap_or(0);
+            let result = media::burn_subtitles(&src, &script, &dest, duration_ms, &cancel, |pct| {
+                let _ = tx.send(Bg::VideoProgress { pct });
+            });
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(Bg::VideoReady { path: dest });
+                }
+                Err(e) => {
+                    let _ = tx.send(Bg::VideoFailed {
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    fn video_ready(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(job) = self.video_export.take() else {
+            return;
+        };
+        if job.cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&path);
+            self.toast(
+                "Stopped. The video was not written.",
+                ToastKind::Ok,
+                None,
+                cx,
+            );
+            return;
+        }
+        let cues = job.cues;
+        if let Some(p) = self.project_mut(&job.pid) {
+            p.exports.insert(
+                0,
+                ExportRecord {
+                    at_ms: now_ms(),
+                    format: Format::Video,
+                    layout: job.layout,
+                    cues,
+                    copied: false,
+                },
+            );
+        }
+        let file = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "video.mp4".into());
+        self.toast(
+            format!("Wrote {file} · {cues} cues."),
+            ToastKind::Ok,
+            None,
+            cx,
+        );
+    }
+
+    fn video_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.video_export.take().is_none() {
+            return;
+        }
+        if error == "cancelled" {
+            self.toast(
+                "Stopped. The video was not written.",
+                ToastKind::Ok,
+                None,
+                cx,
+            );
+            return;
+        }
+        self.toast(
+            format!(
+                "Could not write the video: {}.",
+                error.trim_end_matches('.')
+            ),
+            ToastKind::Bad,
+            None,
+            cx,
+        );
+    }
+
+    /// Kills the encode. The partial file is removed and the original is left as it is.
+    pub fn stop_video_export(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.video_export.as_mut() {
+            job.stopping = true;
+            job.cancel.store(true, Ordering::Relaxed);
         }
         cx.notify();
     }

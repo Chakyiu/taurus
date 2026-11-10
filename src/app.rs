@@ -19,6 +19,7 @@ use gpui_component::input::{InputEvent, InputState};
 
 use crate::capture;
 use crate::data::*;
+use crate::engine::mt::Think;
 use crate::engine::{AsrChoice, CaptureProfile, Settings};
 use crate::live::LiveSession;
 use crate::media::Probe;
@@ -327,11 +328,12 @@ pub enum Dialog {
     },
     /// Adds a translation to a project made without one.
     Translate,
-    /// Language, model and length before a summary is written.
+    /// Language, model, length and reasoning before a summary is written.
     Summarize {
         lang: String,
         model: String,
         long: bool,
+        think: Think,
         models: Vec<String>,
         custom: bool,
         looking: bool,
@@ -353,8 +355,10 @@ pub enum Dialog {
     },
     /// The version, and getting a newer one.
     About,
-    /// What the recording is about, before its lines are corrected.
-    Correct,
+    /// What the recording is about, and how much to reason, before its lines are corrected.
+    Correct {
+        think: Think,
+    },
 }
 
 /// How far finding and installing a new version has got.
@@ -425,6 +429,17 @@ pub struct CorrectJob {
     /// The lines in flight, as 1-based indexes into this run, so the strip
     /// can show which batch is being read while `done` waits for it.
     pub span: Option<(usize, usize)>,
+    pub(crate) cancel: Arc<AtomicBool>,
+}
+
+/// A video being written with this project's cues burned into the picture.
+pub struct VideoExport {
+    pub pct: f32,
+    pub pid: String,
+    pub cues: usize,
+    pub layout: Layout,
+    /// Stop was pressed; the encode is being killed.
+    pub stopping: bool,
     pub(crate) cancel: Arc<AtomicBool>,
 }
 
@@ -500,6 +515,8 @@ pub struct Workbench {
     /// The summary currently being written, if any.
     pub summary_job: Option<SummaryJob>,
     pub correcting: Option<CorrectJob>,
+    /// A burned-in video export in flight, if any.
+    pub video_export: Option<VideoExport>,
     pub downloads: HashMap<String, Download>,
     pub update: UpdateState,
     /// The app bundle Taurus runs from, which an update replaces. None for a
@@ -805,6 +822,7 @@ impl Workbench {
             jobs: HashMap::new(),
             summary_job: None,
             correcting: None,
+            video_export: None,
             downloads: HashMap::new(),
             update: UpdateState::Idle,
             app_bundle: cx.app_path().ok().and_then(|p| crate::update::bundle(&p)),
@@ -1032,6 +1050,11 @@ impl Workbench {
     pub fn open_export(&mut self, cx: &mut Context<Self>) {
         if self.current().is_none_or(|p| p.segs.is_empty()) {
             return;
+        }
+        if self.exp.format == Format::Video
+            && self.current().is_none_or(|p| self.video_file(p).is_none())
+        {
+            self.exp.format = Format::Srt;
         }
         self.open_select = None;
         self.dialog = Some(Dialog::Export);
@@ -2237,14 +2260,11 @@ impl Workbench {
         let Some(built) = self.build_export() else {
             return;
         };
-        let dir = self
-            .current()
-            .filter(|p| p.kind != Kind::Audio)
-            .and_then(|p| p.source_path.as_deref())
-            .and_then(|p| std::path::Path::new(p).parent().map(PathBuf::from))
-            .filter(|d| d.is_dir())
-            .or_else(|| dirs::download_dir().filter(|d| d.is_dir()))
-            .unwrap_or_else(std::env::temp_dir);
+        if self.exp.format == Format::Video {
+            self.start_video_export(built, cx);
+            return;
+        }
+        let dir = self.export_dir();
         let rx = cx.prompt_for_new_path(&dir, Some(&built.filename));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(path))) = rx.await else { return };
@@ -2269,6 +2289,55 @@ impl Workbench {
                     None,
                     cx,
                 ),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn export_dir(&self) -> PathBuf {
+        self.current()
+            .filter(|p| p.kind != Kind::Audio)
+            .and_then(|p| p.source_path.as_deref())
+            .and_then(|p| std::path::Path::new(p).parent().map(PathBuf::from))
+            .filter(|d| d.is_dir())
+            .or_else(|| dirs::download_dir().filter(|d| d.is_dir()))
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
+    /// Asks where to write, then burns the cues into a new video on a background thread.
+    fn start_video_export(&mut self, built: Built, cx: &mut Context<Self>) {
+        if self.video_export.is_some() {
+            self.toast(
+                "A video is already being written.",
+                ToastKind::Bad,
+                None,
+                cx,
+            );
+            return;
+        }
+        let Some(p) = self.current() else { return };
+        let Some(src) = self.video_file(p) else {
+            self.toast(
+                "This project has no video to write into.",
+                ToastKind::Bad,
+                None,
+                cx,
+            );
+            return;
+        };
+        let pid = p.id.clone();
+        let layout = if p.translate {
+            self.exp.layout
+        } else {
+            Layout::Orig
+        };
+        let dir = self.export_dir();
+        let rx = cx.prompt_for_new_path(&dir, Some(&built.filename));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(dest))) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                this.launch_video_export(pid, src, dest, built.text, built.count, layout, cx);
             })
             .ok();
         })

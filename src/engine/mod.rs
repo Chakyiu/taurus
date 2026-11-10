@@ -48,6 +48,11 @@ pub struct Settings {
     pub summary_model: String,
     /// A longer summary instead of a few sentences.
     pub summary_long: bool,
+    /// How much a summary may reason. Medium when an older settings file has none.
+    #[serde(default = "medium_think")]
+    pub summary_think: mt::Think,
+    /// How much a correction may reason.
+    pub correct_think: mt::Think,
     /// Named capture setups, offered at the top of the live caption dialog.
     pub profiles: Vec<CaptureProfile>,
     /// The profile picked last. Empty for none.
@@ -90,6 +95,8 @@ impl Default for Settings {
             summary_lang: String::new(),
             summary_model: String::new(),
             summary_long: false,
+            summary_think: mt::Think::Medium,
+            correct_think: mt::Think::Off,
             profiles: Vec::new(),
             profile: String::new(),
             last_capture: None,
@@ -171,6 +178,10 @@ pub fn model_name(download_id: &str) -> String {
 
 fn short_model(m: &str) -> String {
     m.rsplit('/').next().unwrap_or(m).to_string()
+}
+
+fn medium_think() -> mt::Think {
+    mt::Think::Medium
 }
 
 pub struct WhisperModel {

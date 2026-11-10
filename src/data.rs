@@ -345,10 +345,18 @@ pub enum Format {
     Vtt,
     Ass,
     Txt,
+    /// A new video with the cues burned into the picture.
+    Video,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Srt, Format::Vtt, Format::Ass, Format::Txt];
+    pub const ALL: [Format; 5] = [
+        Format::Srt,
+        Format::Vtt,
+        Format::Ass,
+        Format::Txt,
+        Format::Video,
+    ];
 
     pub fn ext(self) -> &'static str {
         match self {
@@ -356,6 +364,7 @@ impl Format {
             Format::Vtt => "vtt",
             Format::Ass => "ass",
             Format::Txt => "txt",
+            Format::Video => "mp4",
         }
     }
 }
@@ -1363,9 +1372,19 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
             rows.push(one(Role::Idx, "WEBVTT"));
             rows.push(one(Role::Raw, ""));
         }
-        Format::Ass => {
+        Format::Ass | Format::Video => {
             rows.push(one(Role::Idx, "[Script Info]"));
-            for l in ["ScriptType: v4.00+", "PlayResX: 1920", "PlayResY: 1080", ""] {
+            for l in [
+                "ScriptType: v4.00+",
+                "PlayResX: 1920",
+                "PlayResY: 1080",
+                "WrapStyle: 0",
+                "",
+                "[V4+ Styles]",
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+                "Style: Default,PingFang SC,58,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,0,2,80,80,64,1",
+                "",
+            ] {
                 rows.push(one(Role::Raw, l));
             }
             rows.push(one(Role::Idx, "[Events]"));
@@ -1386,10 +1405,16 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
                 }
                 rows.push(one(Role::Raw, ""));
             }
-            Format::Ass => {
+            Format::Ass | Format::Video => {
                 let text = g
                     .iter()
-                    .map(|(_, l)| l.join("\\N"))
+                    .map(|(_, lines)| {
+                        lines
+                            .iter()
+                            .map(|l| ass_escape(l))
+                            .collect::<Vec<_>>()
+                            .join("\\N")
+                    })
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join("\\N");
@@ -1430,14 +1455,35 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
         .map(|r| r.iter().map(|(_, t)| t.as_str()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n");
-    if o.bom && o.format != Format::Txt {
+    if o.bom && !matches!(o.format, Format::Txt | Format::Video) {
         text.insert(0, '\u{FEFF}');
     }
+    let filename = if o.format == Format::Video {
+        format!("{}.subtitled.mp4", file_stem(&p.name))
+    } else {
+        format!("{}.{}.{}", file_stem(&p.name), p.out_lang(), o.format.ext())
+    };
     Built {
         text,
         count: cues.len(),
-        filename: format!("{}.{}.{}", file_stem(&p.name), p.out_lang(), o.format.ext()),
+        filename,
     }
+}
+
+/// ASS override tags and backslashes are written as themselves, so a cue
+/// that contains `{` stays text instead of becoming a style change.
+fn ass_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '\n' => out.push_str("\\N"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1583,6 +1629,44 @@ mod tests {
         assert_eq!(b.count, 10);
         assert!(b.text.starts_with("1\n00:00:04,200 --> "));
         assert_eq!(b.filename, "Streaming-at-Scale-closing-keynote.zh.srt");
+    }
+
+    #[test]
+    fn video_export_is_a_burnable_script() {
+        let mut p = Project::new(
+            "t".into(),
+            Kind::Video,
+            "Talk".into(),
+            "talk.mp4".into(),
+            Some("talk.mp4".into()),
+            Status::Done,
+            "en",
+            "zh",
+            vec![Segment::new(0, 1500, "a {b} c\\d", "你好")],
+        );
+        p.translate = true;
+        let b = build_export(
+            &[],
+            &p,
+            &ExportOptions {
+                format: Format::Video,
+                layout: Layout::Stacked,
+                wrap: 42,
+                merge: false,
+                skip_flagged: false,
+                bom: true,
+                speakers: false,
+            },
+        );
+        assert_eq!(b.count, 1);
+        assert_eq!(b.filename, "Talk.subtitled.mp4");
+        assert!(b.text.starts_with("[Script Info]"));
+        assert!(!b.text.starts_with('\u{FEFF}'));
+        assert!(b.text.contains("PingFang SC"));
+        assert!(
+            b.text
+                .contains(r"Dialogue: 0,0:00:00.00,0:00:01.50,Default,你好\Na \{b\} c\\d")
+        );
     }
 
     #[test]

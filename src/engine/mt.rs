@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{agent, check, untimed_agent};
@@ -22,10 +23,68 @@ pub struct MtConfig {
 
 pub const BATCH: usize = 24;
 
-/// Lines per correction request. Smaller than a translation batch: a proofread
-/// is one string per line, and a reasoning model otherwise sits on a large
-/// batch while the count on screen does not move.
-pub const CORRECT_BATCH: usize = 8;
+/// How much a summary or a correction may reason before it answers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Think {
+    /// The reply is the answer itself.
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Think {
+    pub const ALL: [Think; 4] = [Think::Off, Think::Low, Think::Medium, Think::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Think::Off => "Off",
+            Think::Low => "Low",
+            Think::Medium => "Medium",
+            Think::High => "High",
+        }
+    }
+
+    pub fn note(self) -> &'static str {
+        match self {
+            Think::Off => "Answers directly, without a reasoning pass.",
+            Think::Low => "A brief check, then the answer.",
+            Think::Medium => "Reasons where it helps, then answers.",
+            Think::High => "A careful reasoning pass, then the answer.",
+        }
+    }
+
+    /// Qwen3's chat template reads this at the start of the user message.
+    fn lead(self) -> &'static str {
+        match self {
+            Think::Off => "/no_think\n",
+            _ => "/think\n",
+        }
+    }
+
+    fn pace(self) -> &'static str {
+        match self {
+            Think::Off => "Answer directly. Do not reason, explain or write a think block.",
+            Think::Low => "Check briefly, then answer. Keep any reasoning short.",
+            Think::Medium => "Reason where something is unclear, then answer.",
+            Think::High => "Reason carefully, then answer.",
+        }
+    }
+
+    fn api_name(self) -> Option<&'static str> {
+        match self {
+            Think::Off => None,
+            Think::Low => Some("low"),
+            Think::Medium => Some("medium"),
+            Think::High => Some("high"),
+        }
+    }
+}
+
+/// Lines per correction request. The reply lists only lines that change, so a
+/// batch can be long without the model rewriting every line.
+pub const CORRECT_BATCH: usize = 32;
 
 /// The glossary entries that apply to one project, written as instructions.
 pub fn glossary_rules(terms: &[&Term]) -> Vec<String> {
@@ -275,8 +334,8 @@ const CONTEXT_LINES: usize = 3;
 ///
 /// `on_span` is called as soon as a piece is settled, including when a batch
 /// had to be split, so the count can move before the whole range returns.
-/// `plain` is set once a server rejects the `think` field, and later requests
-/// omit it.
+/// `plain` is set once a server rejects a vendor field, and later requests
+/// use a plain OpenAI body.
 pub fn correct(
     cfg: &MtConfig,
     lang: &str,
@@ -284,6 +343,7 @@ pub fn correct(
     terms: &[String],
     lines: &[String],
     range: Range<usize>,
+    think: Think,
     cancel: &AtomicBool,
     plain: &AtomicBool,
     on_span: &mut dyn FnMut(usize, &[String]),
@@ -295,13 +355,16 @@ pub fn correct(
         bail!("cancelled");
     }
     let n = range.len();
+    let pace = think.pace();
     let mut system = format!(
         "You proofread a transcript made by automatic speech recognition. It is in {lang}, split into subtitle lines.\n\
          - Fix only what the recognizer misheard: wrong words that sound like the right ones, misspelled names and terms, wrong characters.\n\
          - Keep everything else exactly as it is: the wording, the word order, filler words, line breaks and punctuation.\n\
-         - Never translate, rephrase, summarize, merge, split or reorder lines. When nothing in a line is misheard, return it unchanged.\n\
-         - Answer directly. Do not reason, explain or write a think block.\n\
-         - Reply with JSON only, shaped {{\"t\": [\"...\"]}}, holding exactly {n} strings, one for each input line, in order."
+         - Never translate, rephrase, summarize, merge, split or reorder lines.\n\
+         - {pace}\n\
+         - Reply with JSON only, shaped {{\"f\":[{{\"i\":0,\"t\":\"the corrected line\"}}]}}.\n\
+         - i is the index in lines, starting at 0. Include a line only when you change it.\n\
+         - When every line is already right, reply {{\"f\":[]}}."
     );
     if !about.trim().is_empty() {
         system.push_str("\nThe recording is about: ");
@@ -320,38 +383,37 @@ pub fn correct(
         "context_before": &lines[range.start.saturating_sub(CONTEXT_LINES)..range.start],
         "context_after": &lines[range.end..(range.end + CONTEXT_LINES).min(lines.len())],
     });
-    // `/no_think` turns reasoning off in Qwen3's chat template. Other models
-    // see it as a note and are told to ignore it.
-    let user = format!("/no_think\n{}", user);
+    // `/no_think` and `/think` are read by Qwen3's chat template. Other models
+    // see the word as a note and are told to ignore it.
+    let user = format!("{}{user}", think.lead());
     let mut body = json!({
         "model": cfg.model,
-        "temperature": 0.1,
-        "think": false,
+        "temperature": 0,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user },
         ],
     });
-    if plain.load(Ordering::Relaxed) {
-        body.as_object_mut().unwrap().remove("think");
+    // Off stops after the corrected lines. A reasoning level needs the room
+    // to think before the JSON, so it has no token cap.
+    if think == Think::Off {
+        let max_tokens = (n as u64 * 80).clamp(256, 4096);
+        body["max_tokens"] = json!(max_tokens);
     }
-    // Long enough for a slow local model to prefill, short enough that a
-    // batch which never finishes is split instead of pinning the count.
-    let budget = Duration::from_secs(60 + n as u64 * 15);
-    let fetched = match chat_bounded(cfg, body.clone(), cancel, budget) {
-        Err(e) if !plain.load(Ordering::Relaxed) && rejects_think(&e) => {
-            plain.store(true, Ordering::Relaxed);
-            body.as_object_mut().unwrap().remove("think");
-            chat_bounded(cfg, body, cancel, budget)
-        }
-        other => other,
-    };
+    let fetched = deliver(
+        cfg,
+        body,
+        cancel,
+        plain,
+        think,
+        Some(correct_budget(think, n)),
+    );
     let content = match fetched {
         Ok(content) => content,
         Err(e) if cancel.load(Ordering::Relaxed) => return Err(e),
         Err(e) if n > 1 && slow_reply(&e) => {
             return correct_halves(
-                cfg, lang, about, terms, lines, range, cancel, plain, on_span,
+                cfg, lang, about, terms, lines, range, think, cancel, plain, on_span,
             );
         }
         Err(e) if n == 1 && slow_reply(&e) => {
@@ -361,14 +423,14 @@ pub fn correct(
         }
         Err(e) => return Err(e),
     };
-    match json_lines(&content, n) {
+    match corrected_lines(&content, &lines[range.clone()]) {
         Ok(out) => {
             on_span(range.start, &out);
             Ok(out)
         }
         // Smaller models sometimes merge or drop a line; halves line up more often.
         Err(_) if n > 1 => correct_halves(
-            cfg, lang, about, terms, lines, range, cancel, plain, on_span,
+            cfg, lang, about, terms, lines, range, think, cancel, plain, on_span,
         ),
         Err(_) => {
             let out = lines[range.clone()].to_vec();
@@ -385,6 +447,7 @@ fn correct_halves(
     terms: &[String],
     lines: &[String],
     range: Range<usize>,
+    think: Think,
     cancel: &AtomicBool,
     plain: &AtomicBool,
     on_span: &mut dyn FnMut(usize, &[String]),
@@ -397,6 +460,7 @@ fn correct_halves(
         terms,
         lines,
         range.start..mid,
+        think,
         cancel,
         plain,
         on_span,
@@ -408,6 +472,7 @@ fn correct_halves(
         terms,
         lines,
         mid..range.end,
+        think,
         cancel,
         plain,
         on_span,
@@ -415,10 +480,133 @@ fn correct_halves(
     Ok(out)
 }
 
-/// The server refused the `think` field. OpenAI does; Ollama accepts it.
-fn rejects_think(err: &anyhow::Error) -> bool {
-    let s = format!("{err:#}").to_ascii_lowercase();
-    s.contains("400") && s.contains("think")
+/// Drop fields a strict server rejects. Ollama accepts them and uses them to
+/// turn reasoning off.
+fn strip_vendor(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("think");
+        obj.remove("chat_template_kwargs");
+        obj.remove("reasoning_effort");
+        obj.remove("max_tokens");
+    }
+}
+
+/// Asks the server for `think`. A level is a string where the server supports
+/// one, and a boolean where it only knows on or off.
+fn apply_think(body: &mut Value, think: Think) {
+    match think.api_name() {
+        None => {
+            body["think"] = json!(false);
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+            body.as_object_mut().unwrap().remove("reasoning_effort");
+        }
+        Some(level) => {
+            body["think"] = json!(level);
+            body["reasoning_effort"] = json!(level);
+            body["chat_template_kwargs"] = json!({ "enable_thinking": true });
+        }
+    }
+}
+
+fn apply_think_on(body: &mut Value) {
+    strip_vendor(body);
+    body["think"] = json!(true);
+    body["chat_template_kwargs"] = json!({ "enable_thinking": true });
+}
+
+/// Sends `body` with the thinking fields. A server that rejects them is
+/// retried with thinking simply on, then with a plain body. `plain` remembers
+/// that last outcome for the rest of the job. `budget` is the correction
+/// deadline; a summary has none.
+fn deliver(
+    cfg: &MtConfig,
+    mut body: Value,
+    cancel: &AtomicBool,
+    plain: &AtomicBool,
+    think: Think,
+    budget: Option<Duration>,
+) -> Result<String> {
+    let send = |body: Value| match budget {
+        Some(limit) => chat_bounded(cfg, body, cancel, limit),
+        None => chat_streamed(cfg, body, cancel),
+    };
+    if plain.load(Ordering::Relaxed) {
+        strip_vendor(&mut body);
+        return send(body);
+    }
+    apply_think(&mut body, think);
+    match send(body.clone()) {
+        Err(e) if rejected_body(&e) && think != Think::Off => {
+            apply_think_on(&mut body);
+            match send(body.clone()) {
+                Err(e) if rejected_body(&e) => {
+                    plain.store(true, Ordering::Relaxed);
+                    strip_vendor(&mut body);
+                    send(body)
+                }
+                other => other,
+            }
+        }
+        Err(e) if rejected_body(&e) => {
+            plain.store(true, Ordering::Relaxed);
+            strip_vendor(&mut body);
+            send(body)
+        }
+        other => other,
+    }
+}
+
+fn correct_budget(think: Think, n: usize) -> Duration {
+    let n = n as u64;
+    let secs = match think {
+        Think::Off => 40 + n * 3,
+        Think::Low => 50 + n * 6,
+        Think::Medium => 70 + n * 10,
+        Think::High => 90 + n * 16,
+    };
+    Duration::from_secs(secs)
+}
+
+/// The server refused the request body, usually an unknown field.
+fn rejected_body(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("400")
+}
+
+/// Lines after proofreading. A reply shaped `{"f":[{"i","t"}]}` lists only the
+/// lines that changed; a full `{"t":[...]}` of the right length is accepted too.
+fn corrected_lines(content: &str, originals: &[String]) -> Result<Vec<String>> {
+    let v: Value = serde_json::from_str(json_part(content))
+        .map_err(|e| anyhow::anyhow!("the reply was not the expected JSON ({e})"))?;
+    if let Some(arr) = v.get("t").and_then(Value::as_array) {
+        if arr.len() == originals.len() {
+            return json_lines(content, originals.len());
+        }
+        bail!("asked for {} lines and got {}", originals.len(), arr.len());
+    }
+    let Some(fixes) = v.get("f").and_then(Value::as_array) else {
+        bail!("the reply was not the expected JSON");
+    };
+    let mut out = originals.to_vec();
+    for item in fixes {
+        let Some(i) = item.get("i").and_then(json_index) else {
+            continue;
+        };
+        let Some(text) = item.get("t").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.replace("\\n", "\n");
+        let text = text.trim();
+        if i < out.len() && !text.is_empty() {
+            out[i] = text.to_string();
+        }
+    }
+    Ok(out)
+}
+
+fn json_index(v: &Value) -> Option<usize> {
+    v.as_u64()
+        .map(|n| n as usize)
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// The reply stalled or arrived incomplete. A smaller piece may still land.
@@ -487,6 +675,7 @@ pub fn summarize(
     long: bool,
     rules: &[String],
     transcript: &str,
+    think: Think,
     progress: impl Fn(usize, usize),
     cancel: &AtomicBool,
 ) -> Result<String> {
@@ -494,9 +683,12 @@ pub fn summarize(
     if transcript.is_empty() {
         bail!("nothing to summarize");
     }
+    let plain = AtomicBool::new(false);
     let parts = split_transcript(transcript, CHUNK_CHARS);
     if parts.len() <= 1 {
-        return one_summary(cfg, lang, long, rules, transcript, None, cancel);
+        return one_summary(
+            cfg, lang, long, rules, transcript, None, think, &plain, cancel,
+        );
     }
     let mut partials = Vec::with_capacity(parts.len());
     for (i, part) in parts.iter().enumerate() {
@@ -516,6 +708,8 @@ pub fn summarize(
             rules,
             part,
             Some(&note),
+            think,
+            &plain,
             cancel,
         )?);
     }
@@ -532,6 +726,8 @@ pub fn summarize(
         rules,
         &partials.join("\n\n"),
         Some(fold),
+        think,
+        &plain,
         cancel,
     )
 }
@@ -543,6 +739,8 @@ fn one_summary(
     rules: &[String],
     text: &str,
     note: Option<&str>,
+    think: Think,
+    plain: &AtomicBool,
     cancel: &AtomicBool,
 ) -> Result<String> {
     if cancel.load(Ordering::Relaxed) {
@@ -553,12 +751,15 @@ fn one_summary(
     } else {
         "A few sentences of plain prose: what happens, who is involved, and the points that matter."
     };
+    let pace = think.pace();
     let mut system = format!(
         "You summarize a spoken transcript for someone who has not heard it.\n\
          Write in {lang}.\n\
          - {shape}\n\
+         - {pace}\n\
          - Use only what the transcript says. Do not invent scenes, names or motives.\n\
-         - No title, headings, bullets or preamble. Reply with the summary only."
+         - No title, headings, bullets or preamble. Reply with the summary only.\n\
+         - Ignore a leading /think or /no_think; it is an instruction, not part of the transcript."
     );
     if let Some(note) = note {
         system.push('\n');
@@ -577,10 +778,10 @@ fn one_summary(
         "temperature": 0.3,
         "messages": [
             { "role": "system", "content": system },
-            { "role": "user", "content": text },
+            { "role": "user", "content": format!("{}{text}", think.lead()) },
         ],
     });
-    let content = chat_streamed(cfg, body, cancel)?;
+    let content = deliver(cfg, body, cancel, plain, think, None)?;
     let prose = plain_prose(&content);
     if prose.is_empty() {
         bail!("the reply was empty");
@@ -593,6 +794,12 @@ fn plain_prose(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("```") {
         let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric());
         s = rest.trim().trim_end_matches("```").trim();
+    }
+    for prefix in ["/no_think", "/think"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim();
+            break;
+        }
     }
     for prefix in ["Summary:", "Summary：", "摘要:", "摘要："] {
         if let Some(rest) = s.strip_prefix(prefix) {
@@ -664,6 +871,41 @@ mod tests {
             vec!["a\nb"]
         );
         assert_eq!(strip_thinking("<think>a</think> ok"), "ok");
+        let lines = vec!["service".into(), "fine".into(), "天汽".into()];
+        assert_eq!(
+            corrected_lines(
+                r#"{"f":[{"i":0,"t":"servers"},{"i":2,"t":"天气"}]}"#,
+                &lines
+            )
+            .unwrap(),
+            vec!["servers", "fine", "天气"]
+        );
+        assert_eq!(corrected_lines(r#"{"f":[]}"#, &lines).unwrap(), lines);
+        assert_eq!(
+            corrected_lines(
+                r#"{"f":[{"i":"1","t":"ok"},{"i":9,"t":"no"},{"i":0,"t":""}]}"#,
+                &lines
+            )
+            .unwrap(),
+            vec!["service", "ok", "天汽"]
+        );
+        assert_eq!(
+            corrected_lines(r#"{"t":["a","b","c"]}"#, &lines).unwrap(),
+            vec!["a", "b", "c"]
+        );
+        assert!(corrected_lines(r#"{"t":["only one"]}"#, &lines).is_err());
+
+        let mut high = json!({});
+        apply_think(&mut high, Think::High);
+        assert_eq!(high["think"], json!("high"));
+        assert_eq!(high["reasoning_effort"], json!("high"));
+        assert_eq!(high["chat_template_kwargs"]["enable_thinking"], json!(true));
+
+        let mut off = json!({});
+        apply_think(&mut off, Think::Off);
+        assert_eq!(off["think"], json!(false));
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], json!(false));
+        assert!(off.get("reasoning_effort").is_none());
         assert_eq!(plain_prose("```markdown\nSummary: Hello.\n```"), "Hello.");
         assert_eq!(plain_prose("摘要：晚饭谈完了。"), "晚饭谈完了。");
         let long = "one\n".repeat(20);
