@@ -6,9 +6,9 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, Corner, Div, Entity, ExternalPaths,
-    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, img,
-    px, relative,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    anchored, deferred, div, img, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 
@@ -48,10 +48,10 @@ impl Workbench {
     // ─── top bar ───────────────────────────────────────────
 
     /// One slim bar: where you are on the left, what you can do on the right.
-    /// The empty stretches drag the window.
+    /// The empty stretches drag the window. A double-click does what this Mac
+    /// does for any other title bar (fill, zoom, or minimize).
     fn render_topbar(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
         let update = self.update_button(bp, cx);
-        let drag = || div().window_control_area(gpui::WindowControlArea::Drag);
         let back = || {
             button(
                 "top-back",
@@ -132,6 +132,7 @@ impl Workbench {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .child(p.name.clone())
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(|this, _, w, cx| {
                                     let id = this.project_id.clone();
                                     this.open_rename_dialog(id, w, cx)
@@ -163,17 +164,45 @@ impl Workbench {
                 }
             }
         }
-        row()
+        div()
+            .relative()
             .flex_none()
+            .w_full()
             .h(px(48.))
-            .pr(px(10.))
             .border_b_1()
             .border_color(t::line_soft())
-            .child(drag().w(px(78.)).h_full().flex_none())
-            .child(left)
-            .child(drag().flex_1().h_full().min_w(px(12.)))
-            .child(right)
+            .child(
+                div()
+                    .id("topbar-drag")
+                    .absolute()
+                    .inset_0()
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Workbench::on_titlebar_click)),
+            )
+            .child(
+                row()
+                    .size_full()
+                    .pr(px(10.))
+                    .child(div().w(px(78.)).h_full().flex_none())
+                    .child(left)
+                    .child(div().flex_1().h_full().min_w(px(12.)))
+                    .child(right),
+            )
             .into_any_element()
+    }
+
+    /// Double-click on the bar, away from a control, follows the system
+    /// title-bar setting, the same as any other Mac app.
+    fn on_titlebar_click(
+        &mut self,
+        ev: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ev.click_count >= 2 {
+            window.titlebar_double_click();
+            cx.stop_propagation();
+        }
     }
 
     fn crumb(&self, text: &str) -> Div {
@@ -1498,6 +1527,7 @@ fn status_button(id: &'static str, dot: gpui::Hsla, text: String, bp: Bp) -> gpu
         .text_size(t::T_CONTROL)
         .text_color(t::text_2())
         .hover(|s| s.bg(t::surface_2()).text_color(t::text()))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(div().size(px(7.)).rounded_full().bg(dot))
         .when(!bp.tiny(), |d| d.child(text))
 }
@@ -1512,6 +1542,11 @@ impl Render for Workbench {
         };
         let dialog = self.render_dialog(bp, window, cx);
         let toasts = self.render_toasts(bp, cx);
+        // The video's own fullscreen hides the bar so the picture can use the screen.
+        let cine = self.view == View::Editor
+            && self.video_app
+            && self.video_screen
+            && window.is_fullscreen();
 
         div()
             .id("workbench")
@@ -1544,6 +1579,9 @@ impl Render for Workbench {
                 } else if this.editor.editing.is_some() {
                     this.stop_editing(window, cx);
                     cx.stop_propagation();
+                } else if this.video_app || (this.video_screen && window.is_fullscreen()) {
+                    this.leave_video_fit(window, cx);
+                    cx.stop_propagation();
                 }
             }))
             .relative()
@@ -1558,7 +1596,7 @@ impl Render for Workbench {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.drop_paths(paths.paths().to_vec(), cx)
             }))
-            .child(self.render_topbar(bp, cx))
+            .when(!cine, |d| d.child(self.render_topbar(bp, cx)))
             .child(div().flex_1().min_h_0().overflow_hidden().child(main))
             .children(dialog)
             .child(toasts)

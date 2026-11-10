@@ -6,8 +6,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, CursorStyle, Div, ElementId, Hsla,
-    InteractiveElement, IntoElement, ParentElement, ScrollHandle, SharedString, Stateful, Styled,
-    div, px, relative,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, ScrollHandle, SharedString,
+    Stateful, Styled, div, px, relative,
 };
 use gpui_component::scroll::ScrollableElement as _;
 
@@ -182,7 +182,9 @@ pub fn button(
     if let Some(text) = text {
         b = b.child(text.to_string());
     }
-    b
+    // A control owns its click, so a double-click on the bar behind it does not
+    // also zoom the window.
+    b.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 pub fn link_button(id: impl Into<ElementId>, text: &str) -> Stateful<Div> {

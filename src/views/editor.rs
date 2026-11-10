@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, Div, Focusable as _, HighlightStyle,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled,
-    StyledImage as _, StyledText, Window, canvas, div, img, px, relative, rgb, rgba,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, Context, Div, Focusable as _,
+    HighlightStyle, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, ParentElement, SharedString, StatefulInteractiveElement,
+    StrikethroughStyle, Styled, StyledImage as _, StyledText, Window, canvas, div, img, px,
+    relative, rgb, rgba,
 };
 use gpui_component::input::Input;
 
@@ -20,6 +21,33 @@ use crate::ui::*;
 const TIME_W: f32 = 64.;
 /// The speaker colour beside every line, so a turn reads as one block.
 const RAIL_W: f32 = 3.;
+
+/// A control drawn on the picture. `on` is the mode it toggles.
+fn video_mode_button(id: &'static str, ic: Icon, on: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(32.))
+        .rounded(t::R)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(if on {
+            rgba(0xffffff38)
+        } else {
+            rgba(0x05080acc)
+        })
+        .border_1()
+        .border_color(if on {
+            rgba(0xffffff73)
+        } else {
+            rgba(0xffffff24)
+        })
+        .hover(|s| s.bg(rgba(0xffffff4d)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(icon(ic, px(15.), rgb(0xffffff).into()))
+}
 
 impl Workbench {
     /// The one workspace a project has: its lines, whatever is still filling
@@ -75,7 +103,15 @@ impl Workbench {
             None
         };
 
-        let body: AnyElement = if p.segs.is_empty() {
+        let show_summary = self.summary_job.as_ref().is_some_and(|j| j.pid == pid)
+            || self.current().is_some_and(|p| !p.summary.trim().is_empty());
+        let show_video = self.video_file(p).is_some();
+        let fill = show_video && self.video_app;
+        let fullscreen = window.is_fullscreen();
+        // The lines are hidden while the picture fills the window, so skip laying them out.
+        let body = if fill {
+            None
+        } else if p.segs.is_empty() {
             let text = if capturing {
                 self.live.engine_note.clone().unwrap_or_else(|| {
                     "Listening. Lines appear here as soon as someone speaks.".into()
@@ -86,42 +122,81 @@ impl Workbench {
                 "This project has no lines.".into()
             };
             let partial = capturing.then(|| self.heard_line(bp)).flatten();
-            col()
-                .flex_1()
-                .px(bp.pad_x())
-                .children(partial)
-                .when(!capturing || self.live.partial.is_none(), |d| {
-                    d.child(hint(text).py(px(24.)).text_center())
-                })
-                .into_any_element()
+            Some(
+                col()
+                    .flex_1()
+                    .px(bp.pad_x())
+                    .children(partial)
+                    .when(!capturing || self.live.partial.is_none(), |d| {
+                        d.child(hint(text).py(px(24.)).text_center())
+                    })
+                    .into_any_element(),
+            )
         } else {
-            self.line_list(bp, capturing, window, cx)
+            Some(self.line_list(bp, capturing, window, cx))
         };
-
-        let show_summary = self.summary_job.as_ref().is_some_and(|j| j.pid == pid)
-            || self.current().is_some_and(|p| !p.summary.trim().is_empty());
-        let show_video = self.video_file(p).is_some();
         screen()
             .children(strip)
-            .when(!p.segs.is_empty() && !capturing, |d| {
+            .when(!fill && !p.segs.is_empty() && !capturing, |d| {
                 d.child(self.toolbar(bp, cx))
             })
-            .when(show_summary && !capturing, |d| {
+            .when(!fill && show_summary && !capturing, |d| {
                 d.child(self.summary_panel(bp, cx))
             })
             .when(show_video, |d| {
-                d.child(self.video_stage(bp, cx))
+                d.child(self.video_stage(bp, fill, fullscreen, cx))
                     .children(self.audio_source(p).map(|_| self.transport(bp, cx)))
             })
-            .child(body)
+            .children(body)
             .when(!show_video, |d| {
                 d.children(self.audio_source(p).map(|_| self.transport(bp, cx)))
             })
             .into_any_element()
     }
 
+    /// Fills the window under the top bar, or returns to the strip above the lines.
+    fn toggle_video_app(&mut self, cx: &mut Context<Self>) {
+        self.video_app = !self.video_app;
+        cx.notify();
+    }
+
+    /// Sends the picture to the screen. The first press also fills the window;
+    /// the next leaves that space and restores the strip.
+    fn toggle_video_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_fullscreen() && self.video_screen {
+            window.toggle_fullscreen();
+            self.video_screen = false;
+            self.video_app = false;
+        } else if window.is_fullscreen() {
+            self.video_app = true;
+            self.video_screen = true;
+        } else {
+            self.video_app = true;
+            self.video_screen = true;
+            window.toggle_fullscreen();
+        }
+        cx.notify();
+    }
+
+    /// Escape leaves the enlarged picture, and the fullscreen space when this
+    /// control opened it.
+    pub(crate) fn leave_video_fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.video_screen && window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+        self.video_app = false;
+        self.video_screen = false;
+        cx.notify();
+    }
+
     /// The picture for this project, with the cue at the playhead drawn on it.
-    fn video_stage(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+    fn video_stage(
+        &self,
+        bp: Bp,
+        fill: bool,
+        fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let frame = self.video_frame.clone();
         let error = self.video.as_ref().and_then(|v| v.error());
         let (ms, playing) = self.playback_clock();
@@ -133,22 +208,39 @@ impl Workbench {
             .current()
             .is_some_and(|p| self.audio_source(p).is_some());
         let h = if bp.mobile() { 188. } else { 300. };
+        let screen_on = fullscreen && self.video_screen;
         div()
             .id("video-stage")
             .relative()
             .flex()
             .flex_col()
-            .flex_none()
-            .mx(bp.pad_x())
-            .mt(px(8.))
-            .h(px(h))
-            .rounded(t::R_LG)
             .bg(rgb(0x05080A))
             .overflow_hidden()
-            .when(can_play, |d| {
-                d.cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.play(None, cx)))
+            .when(!fill, |d| {
+                d.flex_none()
+                    .mx(bp.pad_x())
+                    .mt(px(8.))
+                    .h(px(h))
+                    .rounded(t::R_LG)
             })
+            .when(fill, |d| d.flex_1().min_h_0())
+            .when(can_play, |d| d.cursor_pointer())
+            .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                if ev.click_count() >= 2 {
+                    // The first click of the pair already toggled playback.
+                    if this.player.is_some() {
+                        this.play(None, cx);
+                    }
+                    this.toggle_video_screen(window, cx);
+                    return;
+                }
+                if this
+                    .current()
+                    .is_some_and(|p| this.audio_source(p).is_some())
+                {
+                    this.play(None, cx);
+                }
+            }))
             .when_some(frame, |d, frame| {
                 d.child(img(frame).flex_1().w_full().object_fit(ObjectFit::Contain))
             })
@@ -222,6 +314,35 @@ impl Workbench {
                         ),
                 )
             })
+            .child(
+                row()
+                    .absolute()
+                    .top(px(10.))
+                    .right(px(10.))
+                    .gap(px(6.))
+                    .child(
+                        video_mode_button("video-app", Icon::Frame, fill).on_click(cx.listener(
+                            |this, ev: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                if ev.click_count() > 1 {
+                                    return;
+                                }
+                                this.toggle_video_app(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        video_mode_button("video-screen", Icon::Expand, screen_on).on_click(
+                            cx.listener(|this, ev: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                if ev.click_count() > 1 {
+                                    return;
+                                }
+                                this.toggle_video_screen(window, cx);
+                            }),
+                        ),
+                    ),
+            )
             .into_any_element()
     }
 

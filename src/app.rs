@@ -474,6 +474,10 @@ pub struct Workbench {
     pub(crate) video_seen: u64,
     /// The frame currently on screen. The previous one is freed from the atlas.
     pub(crate) video_frame: Option<Arc<RenderImage>>,
+    /// The picture fills the window under the top bar.
+    pub(crate) video_app: bool,
+    /// The video control put the window into the fullscreen space.
+    pub(crate) video_screen: bool,
     pub(crate) retired_video: Vec<Arc<RenderImage>>,
     pub scrub_bounds: Rc<Cell<Bounds<Pixels>>>,
     pub scrubbing: bool,
@@ -782,6 +786,8 @@ impl Workbench {
             video: None,
             video_seen: 0,
             video_frame: None,
+            video_app: false,
+            video_screen: false,
             retired_video: Vec::new(),
             scrub_bounds: Rc::new(Cell::new(Bounds::default())),
             scrubbing: false,
@@ -1274,6 +1280,8 @@ impl Workbench {
         self.editor.editing = None;
         self.video = None;
         self.video_seen = 0;
+        self.video_app = false;
+        self.video_screen = false;
         if let Some(frame) = self.video_frame.take() {
             self.retired_video.push(frame);
         }
