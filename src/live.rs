@@ -14,6 +14,7 @@ use anyhow::Result;
 
 use crate::capture::{self, Capture, CaptureKind};
 use crate::engine::Settings;
+use crate::store;
 use crate::engine::asr::{Engine, resegment, rms};
 use crate::media::SAMPLE_RATE;
 use crate::subs::is_cjk;
@@ -84,7 +85,7 @@ pub fn start(
         Ok(c) => c,
         Err(e) => {
             drop(recording);
-            let _ = std::fs::remove_file(record);
+            store::discard_owned(record);
             return Err(e);
         }
     };
@@ -100,8 +101,8 @@ pub fn start(
             Err(e) => {
                 drop(capture);
                 drop(recording);
-                let _ = std::fs::remove_file(record);
-                let _ = std::fs::remove_file(&v.path);
+                store::discard_owned(record);
+                store::discard_owned(&v.path);
                 return Err(e);
             }
         },

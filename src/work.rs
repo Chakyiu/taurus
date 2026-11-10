@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
@@ -56,9 +55,25 @@ pub enum Bg {
         job: u64,
         segs: Vec<Segment>,
     },
+    /// The video project now lives in its folder under Movies.
+    Relocated {
+        job: u64,
+        result: Result<PathBuf, String>,
+    },
     ExtractFailed {
         job: u64,
         error: String,
+    },
+    /// A reprocess is reading the recording; `note` is the progress line.
+    ReprocessNote {
+        pid: String,
+        job: u64,
+        note: String,
+    },
+    Reprocessed {
+        pid: String,
+        job: u64,
+        result: Result<Vec<Segment>, String>,
     },
     Download {
         id: String,
@@ -137,6 +152,13 @@ pub struct SpeakerJob {
     pub done: usize,
     pub total: usize,
     cancel: Arc<AtomicBool>,
+}
+
+pub struct ReprocessJob {
+    pub pid: String,
+    pub job: u64,
+    pub note: String,
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
@@ -231,7 +253,10 @@ impl Workbench {
                 }
             }
             Bg::Extracted { job, segs } => self.extracted(job, segs, cx),
+            Bg::Relocated { job, result } => self.relocated(job, result, cx),
             Bg::ExtractFailed { job, error } => self.extract_failed(job, error, cx),
+            Bg::ReprocessNote { pid, job, note } => self.reprocess_note(&pid, job, note),
+            Bg::Reprocessed { pid, job, result } => self.reprocessed(&pid, job, result, cx),
             Bg::Download { id, pct } => {
                 if let Some(d) = self.downloads.get_mut(&id) {
                     d.pct = pct;
@@ -945,11 +970,12 @@ impl Workbench {
         self.extract.failed = None;
         let file = self.extract.file.as_ref().expect("a file was picked");
         let (name, file_path) = (file.name.clone(), file.path.to_string_lossy().to_string());
+        let title = title_from_file(&name);
         let id = self.fresh_id("p");
         let p = Project::new(
             id.clone(),
             Kind::Video,
-            title_from_file(&name),
+            title.clone(),
             name,
             Some(file_path),
             Status::Working,
@@ -985,15 +1011,57 @@ impl Workbench {
                 });
             };
             let result = (|| -> anyhow::Result<Vec<Segment>> {
+                note(1, StageState::Run, "Saving into Movies…".into());
+                let media = match store::save_video(&title, &path) {
+                    Ok(saved) => {
+                        if cancel.load(Ordering::Relaxed) {
+                            store::discard_owned(&saved);
+                            anyhow::bail!("cancelled");
+                        }
+                        let _ = tx.send(Bg::Relocated {
+                            job,
+                            result: Ok(saved.clone()),
+                        });
+                        saved
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Bg::Relocated {
+                            job,
+                            result: Err(format!("{e:#}")),
+                        });
+                        path.clone()
+                    }
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelled");
+                }
                 let mut segs = match track {
                     TrackKey::Sub(stream) => {
-                        let segs = media::extract_subtitle(&path, stream)?;
+                        let segs = media::extract_subtitle(&media, stream)?;
                         note(1, StageState::Done, format!("{} cues", segs.len()));
                         segs
                     }
-                    TrackKey::Audio(stream) => transcribe_file(
-                        &path, stream, &settings, &lang, duration, &note, &tx, job, &cancel,
-                    )?,
+                    TrackKey::Audio(stream) => {
+                        let tx_listen = tx.clone();
+                        let listen: Arc<dyn Fn(usize, StageState, String) + Send + Sync> =
+                            Arc::new(move |stage, state, note| {
+                                let _ = tx_listen.send(Bg::Stage {
+                                    job,
+                                    stage,
+                                    state,
+                                    note,
+                                });
+                            });
+                        transcribe_file(
+                            &media,
+                            Some(stream),
+                            &settings,
+                            &lang,
+                            duration,
+                            &listen,
+                            &cancel,
+                        )?
+                    }
                 };
                 if cancel.load(Ordering::Relaxed) {
                     anyhow::bail!("cancelled");
@@ -1107,6 +1175,226 @@ impl Workbench {
         );
     }
 
+    /// Asks before replacing the lines. A project with none yet starts at once.
+    pub fn ask_reprocess(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.current() else { return };
+        if !self.settings.asr_ready() {
+            self.toast(
+                "Speech recognition is not set up yet. Download a Whisper model or point Taurus at a Qwen3-ASR server.",
+                ToastKind::Warn,
+                Some(("Set up engines", ToastAction::Engines)),
+                cx,
+            );
+            return;
+        }
+        if self.audio_source(p).is_none() {
+            self.toast(
+                "The recording for this project is gone.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
+            return;
+        }
+        let id = p.id.clone();
+        if p.segs.is_empty() {
+            self.reprocess_subtitles(&id, cx);
+            return;
+        }
+        let n = p.segs.len();
+        self.dialog = Some(Dialog::Confirm {
+            title: "Reprocess the subtitles?".into(),
+            text: format!(
+                "The speech model reads this recording again and replaces the {n} lines. Edits on them are lost."
+            ),
+            ok_label: "Reprocess subtitle".into(),
+            action: ConfirmAction::Reprocess(id),
+        });
+        cx.notify();
+    }
+
+    /// Sends the project's video or voice recording through the speech model
+    /// again. The lines stay as they are until a new reading is ready.
+    pub fn reprocess_subtitles(&mut self, pid: &str, cx: &mut Context<Self>) {
+        if self.reprocess.is_some() {
+            self.toast(
+                "A recording is already being read again.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
+            return;
+        }
+        if !self.settings.asr_ready() {
+            self.toast(
+                "Speech recognition is not set up yet. Download a Whisper model or point Taurus at a Qwen3-ASR server.",
+                ToastKind::Warn,
+                Some(("Set up engines", ToastAction::Engines)),
+                cx,
+            );
+            return;
+        }
+        let Some(p) = self.project(pid) else { return };
+        let Some(path) = self.audio_source(p) else {
+            self.toast(
+                "The recording for this project is gone.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
+            return;
+        };
+        let lang = p.from.clone();
+        let settings = self.settings.clone();
+        if let Some(job) = self.jobs.remove(pid) {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.next_id += 1;
+        let job = self.next_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.reprocess = Some(ReprocessJob {
+            pid: pid.to_string(),
+            job,
+            note: "Reading the recording…".into(),
+            cancel: cancel.clone(),
+        });
+        let tx = self.bg_tx.clone();
+        let pid = pid.to_string();
+        spawn("reprocess", move || {
+            let tx_note = tx.clone();
+            let pid_note = pid.clone();
+            let note: Arc<dyn Fn(usize, StageState, String) + Send + Sync> =
+                Arc::new(move |_stage, _state, text| {
+                    let _ = tx_note.send(Bg::ReprocessNote {
+                        pid: pid_note.clone(),
+                        job,
+                        note: text,
+                    });
+                });
+            let result = (|| -> anyhow::Result<Vec<Segment>> {
+                let duration = media::probe(&path).map(|p| p.duration_ms).unwrap_or(0);
+                let mut segs = transcribe_file(
+                    &path, None, &settings, &lang, duration, &note, &cancel,
+                )?;
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelled");
+                }
+                retime(&mut segs);
+                Ok(segs)
+            })();
+            let _ = tx.send(Bg::Reprocessed {
+                pid,
+                job,
+                result: result.map_err(|e| format!("{e:#}")),
+            });
+        });
+        cx.notify();
+    }
+
+    pub fn stop_reprocess(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.reprocess.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+            self.toast(
+                "Stopped. The lines are unchanged.",
+                ToastKind::Ok,
+                None,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn reprocess_note(&mut self, pid: &str, job: u64, note: String) {
+        if let Some(j) = self.reprocess.as_mut()
+            && j.pid == pid
+            && j.job == job
+        {
+            j.note = note;
+        }
+    }
+
+    fn reprocessed(
+        &mut self,
+        pid: &str,
+        job: u64,
+        result: Result<Vec<Segment>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .reprocess
+            .as_ref()
+            .is_none_or(|j| j.pid != pid || j.job != job)
+        {
+            return;
+        }
+        self.reprocess = None;
+        let segs = match result {
+            Ok(segs) => segs,
+            Err(error) if error == "cancelled" => return,
+            Err(error) => {
+                self.toast(
+                    format!(
+                        "Could not read the recording again: {}.",
+                        error.trim_end_matches('.')
+                    ),
+                    ToastKind::Bad,
+                    None,
+                    cx,
+                );
+                return;
+            }
+        };
+        if segs.is_empty() {
+            self.toast(
+                "No speech was heard, so the lines are unchanged.",
+                ToastKind::Warn,
+                None,
+                cx,
+            );
+            return;
+        }
+        let n = segs.len();
+        let Some(p) = self.project_mut(pid) else { return };
+        p.segs = segs;
+        p.error = None;
+        if p.status == Status::Failed || p.status == Status::Working {
+            p.status = Status::Review;
+        }
+        let translate = p.translate;
+        let name = p.name.clone();
+        if self.project_id.as_deref() == Some(pid) {
+            self.editor.editing = None;
+            self.editor.active = None;
+            self.editor.loading.clear();
+        }
+        self.save_now();
+        if translate && self.settings.mt_ready() {
+            self.toast(
+                format!("Read “{name}” again · {n} lines. Translating now."),
+                ToastKind::Ok,
+                None,
+                cx,
+            );
+            self.translate_project(pid, None, cx);
+        } else if translate {
+            self.settle_all();
+            self.toast(
+                format!("Read “{name}” again · {n} lines, not translated yet because translation is not set up."),
+                ToastKind::Warn,
+                Some(("Set up engines", ToastAction::Engines)),
+                cx,
+            );
+        } else {
+            self.settle_all();
+            self.toast(
+                format!("Read “{name}” again · {n} lines."),
+                ToastKind::Ok,
+                None,
+                cx,
+            );
+        }
+    }
+
     // ─── live ──────────────────────────────────────────────
 
     pub fn open_capture(&mut self, cx: &mut Context<Self>) {
@@ -1170,16 +1458,35 @@ impl Workbench {
         let settings = self.settings.clone();
         let lang = self.live.from.clone();
         let pid = self.fresh_id("p");
-        let audio = store::recording_path(&pid);
-        let video = (self.live.can_video && self.live.video != capture::NO_VIDEO).then(|| {
-            live::VideoPlan {
+        let now = chrono::Local::now();
+        let name = format!(
+            "{} · {}",
+            self.live.source.label(),
+            now.format("%-d %b %H:%M")
+        );
+        let record_video = self.live.can_video && self.live.video != capture::NO_VIDEO;
+        let (audio, video, movies_fallback) = if record_video {
+            let plan = |path: PathBuf| live::VideoPlan {
                 target: self.live.video.clone(),
                 quality: self.live.video_quality,
                 system_audio: self.live.source != Source::Mic,
                 microphone: self.live.source != Source::System,
-                path: store::video_path(&pid),
+                path,
+            };
+            match store::project_folder(&name) {
+                Ok(dir) => (dir.join("audio.wav"), Some(plan(dir.join("video.mp4"))), false),
+                Err(e) => {
+                    eprintln!("saving into Movies: {e:#}");
+                    (
+                        store::recording_path(&pid),
+                        Some(plan(store::video_path(&pid))),
+                        true,
+                    )
+                }
             }
-        });
+        } else {
+            (store::recording_path(&pid), None, false)
+        };
         let video_path = video.as_ref().map(|v| v.path.clone());
         cx.spawn(async move |this, cx| {
             let path = audio.clone();
@@ -1188,7 +1495,7 @@ impl Workbench {
                 .spawn(async move { live::start(&settings, kind, lang, 0, &path, video) })
                 .await;
             this.update(cx, |this, cx| {
-                this.live_started(res, pid, audio, video_path, cx)
+                this.live_started(res, pid, name, audio, video_path, movies_fallback, cx)
             })
             .ok();
         })
@@ -1200,14 +1507,20 @@ impl Workbench {
         &mut self,
         res: anyhow::Result<live::LiveSession>,
         pid: String,
+        name: String,
         audio: PathBuf,
         video: Option<PathBuf>,
+        movies_fallback: bool,
         cx: &mut Context<Self>,
     ) {
         self.live.starting = false;
         let session = match res {
             Ok(s) => s,
             Err(e) => {
+                store::discard_owned(&audio);
+                if let Some(v) = &video {
+                    store::discard_owned(v);
+                }
                 self.toast(
                     format!("Could not start listening: {e:#}."),
                     ToastKind::Bad,
@@ -1226,7 +1539,7 @@ impl Workbench {
             ),
             AsrChoice::Qwen => "Connecting to Qwen3-ASR…".into(),
         });
-        self.start_capture_project(pid.clone(), audio, cx);
+        self.start_capture_project(pid.clone(), name, audio, movies_fallback, cx);
         if let (Some(v), Some(p)) = (video, self.project_mut(&pid)) {
             p.video_path = Some(v.to_string_lossy().to_string());
         }
@@ -1255,13 +1568,14 @@ impl Workbench {
 
     /// Pressing Start creates the project that will hold the track and its
     /// audio, so a capture has no unsaved state.
-    fn start_capture_project(&mut self, id: String, audio: PathBuf, cx: &mut Context<Self>) {
-        let now = chrono::Local::now();
-        let name = format!(
-            "{} · {}",
-            self.live.source.label(),
-            now.format("%-d %b %H:%M")
-        );
+    fn start_capture_project(
+        &mut self,
+        id: String,
+        name: String,
+        audio: PathBuf,
+        movies_fallback: bool,
+        cx: &mut Context<Self>,
+    ) {
         let p = Project::new(
             id.clone(),
             Kind::Audio,
@@ -1277,12 +1591,53 @@ impl Workbench {
         p.translate = self.settings.translate;
         self.projects.insert(0, p);
         self.live.project_id = Some(id.clone());
+        let note = if movies_fallback {
+            format!(
+                "Recording into “{name}”. It could not be saved in Movies, so the files are in Taurus's library."
+            )
+        } else {
+            format!("Recording into “{name}”.")
+        };
         self.toast(
-            format!("Recording into “{name}”."),
+            note,
             ToastKind::Ok,
             Some(("Rename", ToastAction::Rename(id))),
             cx,
         );
+    }
+
+    /// Points the open video project at the copy in its Movies folder.
+    fn relocated(
+        &mut self,
+        job: u64,
+        result: Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if job != self.extract.job {
+            if let Ok(path) = result {
+                store::discard_owned(&path);
+            }
+            return;
+        }
+        match result {
+            Ok(path) => {
+                let id = self.extract.project_id.clone();
+                let Some(p) = id.and_then(|id| self.project_mut(&id)) else {
+                    store::discard_owned(&path);
+                    return;
+                };
+                p.source_path = Some(path.to_string_lossy().to_string());
+                self.save_now();
+            }
+            Err(error) => self.toast(
+                format!(
+                    "Could not save the video into Movies ({error}). The project keeps the original file."
+                ),
+                ToastKind::Warn,
+                None,
+                cx,
+            ),
+        }
     }
 
     pub fn pause_live(&mut self, cx: &mut Context<Self>) {
@@ -3009,13 +3364,11 @@ impl Workbench {
 #[allow(clippy::too_many_arguments)]
 fn transcribe_file(
     path: &Path,
-    stream: usize,
+    stream: Option<usize>,
     settings: &Settings,
     lang: &str,
     duration: i64,
-    note: &dyn Fn(usize, StageState, String),
-    tx: &Sender<Bg>,
-    job: u64,
+    note: &Arc<dyn Fn(usize, StageState, String) + Send + Sync>,
     cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<Vec<Segment>> {
     note(1, StageState::Run, "loading model".into());
@@ -3023,7 +3376,7 @@ fn transcribe_file(
     let mut last = Instant::now();
     let pcm = media::decode_audio(
         path,
-        Some(stream),
+        stream,
         |ms| {
             if last.elapsed() > Duration::from_millis(400) {
                 last = Instant::now();
@@ -3041,17 +3394,12 @@ fn transcribe_file(
     note(1, StageState::Run, "listening 0%".into());
     let sent = Arc::new(AtomicU32::new(0));
     let progress: crate::engine::asr::Progress = {
-        let tx = tx.clone();
+        let note = note.clone();
         let sent = sent.clone();
         Arc::new(move |p: f32| {
             let pct = (p * 100.0).clamp(0.0, 100.0) as u32;
             if pct != sent.swap(pct, Ordering::Relaxed) {
-                let _ = tx.send(Bg::Stage {
-                    job,
-                    stage: 1,
-                    state: StageState::Run,
-                    note: format!("listening {pct}%"),
-                });
+                note(1, StageState::Run, format!("listening {pct}%"));
             }
         })
     };

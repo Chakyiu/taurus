@@ -25,7 +25,7 @@ use crate::live::LiveSession;
 use crate::media::Probe;
 use crate::store;
 use crate::update::Release;
-use crate::work::{Bg, SpeakerJob};
+use crate::work::{Bg, ReprocessJob, SpeakerJob};
 
 /// Debug builds honour `TAURUS_VIEW=editor|glossary` for screenshots.
 fn initial_view() -> View {
@@ -303,6 +303,7 @@ pub enum Sel {
 pub enum ConfirmAction {
     DeleteProject(String),
     DeleteTerm(String),
+    Reprocess(String),
 }
 
 pub enum Dialog {
@@ -503,6 +504,8 @@ pub struct Workbench {
     pub play_line: Option<usize>,
     /// Voices being told apart for one project.
     pub speaking: Option<SpeakerJob>,
+    /// The recording being read again by the speech model, if any.
+    pub reprocess: Option<ReprocessJob>,
     /// A project waiting for the speaker model to finish downloading.
     pub speaker_pending: Option<String>,
     pub open_select: Option<Sel>,
@@ -813,6 +816,7 @@ impl Workbench {
             scrubbing: false,
             play_line: None,
             speaking: None,
+            reprocess: None,
             speaker_pending: None,
             open_select: None,
             select_closed: None,
@@ -1664,10 +1668,25 @@ impl Workbench {
                 job.cancel.store(true, Ordering::Relaxed);
             }
         }
-        if let Some(p) = self.project(id).filter(|p| p.kind == Kind::Audio) {
-            for file in [&p.source_path, &p.video_path].into_iter().flatten() {
-                let _ = std::fs::remove_file(file);
+        if self.reprocess.as_ref().is_some_and(|j| j.pid == id) {
+            if let Some(job) = self.reprocess.take() {
+                job.cancel.store(true, Ordering::Relaxed);
             }
+        }
+        let owned: Vec<String> = self
+            .project(id)
+            .map(|p| match p.kind {
+                Kind::Audio => [&p.source_path, &p.video_path]
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect(),
+                Kind::Video => p.source_path.iter().cloned().collect(),
+                Kind::Subtitle => Vec::new(),
+            })
+            .unwrap_or_default();
+        for file in owned {
+            store::discard_owned(std::path::Path::new(&file));
         }
         if self
             .live
@@ -1819,6 +1838,7 @@ impl Workbench {
         window.focus(&self.focus);
         match action {
             ConfirmAction::DeleteProject(id) => self.confirm_delete_project(&id, cx),
+            ConfirmAction::Reprocess(id) => self.reprocess_subtitles(&id, cx),
             ConfirmAction::DeleteTerm(id) => {
                 if let Some(pos) = self.glossary.iter().position(|g| g.id == id) {
                     let g = self.glossary.remove(pos);

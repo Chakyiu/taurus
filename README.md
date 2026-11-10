@@ -12,7 +12,7 @@
 
 ## What it does
 
-- **Live caption.** Captions what you hear as it plays: your Mac's sound and your microphone together (the default, good for both sides of a call), or either one alone. Taurus records the audio into the project, so you can play it back or work on it later. On macOS 15 and later it can also record the screen, either the whole display or just one app's windows, as an `.mp4` kept with the project on the same clock as the captions. Movies are HEVC (H.265), at Small (720p, 15 fps), Standard (1080p, the default) or Full (the display's own resolution). Save a setup you use often (what to listen to, which microphone, what to record and at what quality) as a named profile. The dialog always opens with the choices of your last capture.
+- **Live caption.** Captions what you hear as it plays: your Mac's sound and your microphone together (the default, good for both sides of a call), or either one alone. Taurus records the audio into the project, so you can play it back or work on it later. On macOS 15 and later it can also record the screen, either the whole display or just one app's windows, as an `.mp4` in a folder under Movies, on the same clock as the captions. Movies are HEVC (H.265), at Small (720p, 15 fps), Standard (1080p, the default) or Full (the display's own resolution). Save a setup you use often (what to listen to, which microphone, what to record and at what quality) as a named profile. The dialog always opens with the choices of your last capture.
 - **From a video.** Reads a video's subtitle track, or transcribes its audio when it has none. Long cues are retimed and split.
 - **Import subtitles.** Drop in `.srt`, `.vtt`, `.ass` or `.ssa` files.
 - **Speaker identification.** Works out who said each line and labels it Speaker 1, Speaker 2 and so on. Click a name to rename that speaker everywhere.
@@ -89,10 +89,10 @@ Everything is stored in `~/Library/Application Support/Taurus`:
 |---|---|
 | `library.json` | Projects (lines, translations, speakers) and the glossary |
 | `settings.json` | Engine choices and the translation endpoint |
-| `recordings/<project>.wav` | Audio recorded during live captions (16 kHz mono) |
+| `recordings/<project>.wav` | Audio from a live caption that does not record the screen (16 kHz mono) |
 | `models/` | Downloaded speech and speaker models |
 
-Video projects refer to the original file where it is. Taurus doesn't copy it.
+A video project, and a live caption that records the screen, is a folder under `~/Movies/Taurus`, named after the project. The video sits inside that folder, and a screen recording keeps `audio.wav` beside `video.mp4` rather than as two loose files. Opening a video leaves the original file where it was and saves a copy into the folder. Deleting the project removes that folder.
 
 ## Development
 
@@ -107,7 +107,7 @@ Debug builds accept environment variables that open the app straight into a give
 
 | Variable | Effect |
 |---|---|
-| `TAURUS_DATA_DIR=<dir>` | Use another folder for the library, settings and recordings |
+| `TAURUS_DATA_DIR=<dir>` | Use another folder for the library, settings and recordings. Debug builds also keep video project folders in `<dir>/Movies` |
 | `TAURUS_VIEW=editor\|glossary` | Start in the open project or the glossary |
 | `TAURUS_DIALOG=engines\|capture\|export\|translate\|about\|correct` | Open a dialog (`correct` with `TAURUS_VIEW=editor`) |
 | `TAURUS_IMPORT=a.srt,b.vtt` / `TAURUS_EXTRACT=video.mp4` | Import files or pick a video |

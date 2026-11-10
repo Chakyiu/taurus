@@ -89,6 +89,8 @@ impl Workbench {
             Some(self.live_strip(bp, cx))
         } else if extracting {
             Some(self.extract_strip(bp, cx))
+        } else if self.reprocess.as_ref().is_some_and(|j| j.pid == pid) {
+            Some(self.reprocess_strip(bp, cx))
         } else if self.speaking.as_ref().is_some_and(|j| j.pid == pid)
             || self.speaker_pending.as_deref() == Some(pid.as_str())
         {
@@ -456,6 +458,10 @@ impl Workbench {
             && self.speaking.is_none()
             && self.speaker_pending.is_none()
             && p.status != Status::Working;
+        let reprocessing = self.reprocess.as_ref().is_some_and(|j| j.pid == p.id);
+        let can_reprocess = self.audio_source(p).is_some()
+            && p.status != Status::Working
+            && p.status != Status::Live;
         row()
             .flex_none()
             .gap(px(14.))
@@ -475,6 +481,24 @@ impl Workbench {
                 )
             })
             .child(fill())
+            .when(can_reprocess || reprocessing, |d| {
+                d.child(
+                    button(
+                        "ed-reprocess",
+                        Btn::Quiet,
+                        Some(Icon::Captions),
+                        Some(if reprocessing {
+                            "Reprocessing…"
+                        } else {
+                            "Reprocess subtitle"
+                        }),
+                        reprocessing,
+                    )
+                    .when(!reprocessing, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.ask_reprocess(cx)))
+                    }),
+                )
+            })
             .map(|d| {
                 let busy = self.correcting.as_ref().is_some_and(|j| j.pid == p.id);
                 d.child(
@@ -1111,6 +1135,29 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn reprocess_strip(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
+        let note = self
+            .reprocess
+            .as_ref()
+            .map(|j| j.note.clone())
+            .unwrap_or_default();
+        self.strip(bp)
+            .child(Self::strip_title("Reprocessing subtitles"))
+            .child(
+                mono(div())
+                    .flex_none()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(note),
+            )
+            .child(div().flex_1().min_w(px(60.)).child(running_bar("re-run")))
+            .child(
+                button("re-stop", Btn::Quiet, None, Some("Stop"), false)
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_reprocess(cx))),
+            )
+            .into_any_element()
+    }
+
     fn speaker_strip(&self, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
         let (title, note) = match &self.speaking {
             Some(j) => (
@@ -1335,6 +1382,7 @@ impl Workbench {
 
     fn failed_strip(&self, p: &Project, bp: Bp, cx: &mut Context<Self>) -> AnyElement {
         let id = p.id.clone();
+        let can_reprocess = self.audio_source(p).is_some();
         row()
             .flex_none()
             .gap(px(12.))
@@ -1355,6 +1403,18 @@ impl Workbench {
                             .trim_end_matches('.')
                     )),
             )
+            .when(can_reprocess, |d| {
+                d.child(
+                    button(
+                        "ed-failed-reprocess",
+                        Btn::Quiet,
+                        Some(Icon::Captions),
+                        Some("Reprocess subtitle"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.ask_reprocess(cx))),
+                )
+            })
             .child(
                 button(
                     "ed-failed-del",
