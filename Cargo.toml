@@ -1,6 +1,6 @@
 [package]
 name = "taurus"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Taurus, a subtitle translation workbench"
 
