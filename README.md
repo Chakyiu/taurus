@@ -139,3 +139,7 @@ design/           the original design handoff
 ```
 
 Built with [gpui](https://www.gpui.rs) and [gpui-component](https://github.com/longbridge/gpui-component).
+
+<p align="center">
+  <a href="https://buymeacoffee.com/chakyiu"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="40"></a>
+</p>
