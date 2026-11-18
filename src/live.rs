@@ -14,9 +14,9 @@ use anyhow::Result;
 
 use crate::capture::{self, Capture, CaptureKind};
 use crate::engine::Settings;
-use crate::store;
 use crate::engine::asr::{Engine, resegment, rms};
 use crate::media::SAMPLE_RATE;
+use crate::store;
 use crate::subs::is_cjk;
 
 pub enum LiveEvent {

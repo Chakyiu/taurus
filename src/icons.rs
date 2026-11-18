@@ -44,6 +44,8 @@ pub enum Icon {
     Frame,
     /// The picture filling the screen.
     Expand,
+    /// Sliders, for a project's own settings.
+    Sliders,
 }
 
 const ALL: &[Icon] = &[
@@ -81,6 +83,7 @@ const ALL: &[Icon] = &[
     Icon::Wand,
     Icon::Frame,
     Icon::Expand,
+    Icon::Sliders,
 ];
 
 impl Icon {
@@ -103,6 +106,7 @@ impl Icon {
             Icon::Wand => "wand",
             Icon::Frame => "frame",
             Icon::Expand => "expand",
+            Icon::Sliders => "sliders",
             Icon::Monitor => "monitor",
             Icon::Crop => "crop",
             Icon::Swap => "swap",
@@ -159,6 +163,9 @@ impl Icon {
             }
             Icon::Frame => "M4.5 5.5h15v13h-15zM4.5 9h15",
             Icon::Expand => "M4.5 9V4.5H9M15 4.5h4.5V9M4.5 15v4.5H9M15 19.5h4.5V15",
+            Icon::Sliders => {
+                "M20 6.5H14M10 6.5H4M20 12H13M8 12H4M20 17.5H16M12 17.5H4M14 4.5v4M8 10v4M16 15.5v4"
+            }
             Icon::Crop => "M7.5 3v4.5H3M16.5 21v-4.5H21M3 16.5h4.5V21M21 7.5h-4.5V3",
             Icon::Swap => {
                 "M7 6.5h12m0 0-3.2-3.2M19 6.5l-3.2 3.2M17 17.5H5m0 0 3.2-3.2M5 17.5l3.2 3.2"

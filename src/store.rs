@@ -74,8 +74,7 @@ fn movies_override() -> Option<PathBuf> {
 /// A new folder under Movies, named after the project. A name already in use
 /// gains a number, so two captures in the same minute do not share a folder.
 pub fn project_folder(name: &str) -> Result<PathBuf> {
-    unique_folder(&movies_dir(), &folder_name(name))
-        .context("could not create a folder in Movies")
+    unique_folder(&movies_dir(), &folder_name(name)).context("could not create a folder in Movies")
 }
 
 /// Saves `src` into a new project folder and returns the file there. The
@@ -145,11 +144,7 @@ fn folder_name(name: &str) -> String {
         .chars()
         .take(80)
         .collect::<String>();
-    if out.is_empty() {
-        "Video".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "Video".into() } else { out }
 }
 
 fn file_name_of(path: &Path) -> String {

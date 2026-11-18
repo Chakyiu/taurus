@@ -234,8 +234,7 @@ pub fn record_screen(
         .with_captures_microphone(microphone)
         .map_err(|e| anyhow!("{e}"))?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let _ = std::fs::remove_file(path);
     let out_config = SCRecordingOutputConfiguration::new()

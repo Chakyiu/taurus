@@ -1273,9 +1273,8 @@ impl Workbench {
                 });
             let result = (|| -> anyhow::Result<Vec<Segment>> {
                 let duration = media::probe(&path).map(|p| p.duration_ms).unwrap_or(0);
-                let mut segs = transcribe_file(
-                    &path, None, &settings, &lang, duration, &note, &cancel,
-                )?;
+                let mut segs =
+                    transcribe_file(&path, None, &settings, &lang, duration, &note, &cancel)?;
                 if cancel.load(Ordering::Relaxed) {
                     anyhow::bail!("cancelled");
                 }
@@ -1294,12 +1293,7 @@ impl Workbench {
     pub fn stop_reprocess(&mut self, cx: &mut Context<Self>) {
         if let Some(job) = self.reprocess.take() {
             job.cancel.store(true, Ordering::Relaxed);
-            self.toast(
-                "Stopped. The lines are unchanged.",
-                ToastKind::Ok,
-                None,
-                cx,
-            );
+            self.toast("Stopped. The lines are unchanged.", ToastKind::Ok, None, cx);
         }
         cx.notify();
     }
@@ -1354,7 +1348,9 @@ impl Workbench {
             return;
         }
         let n = segs.len();
-        let Some(p) = self.project_mut(pid) else { return };
+        let Some(p) = self.project_mut(pid) else {
+            return;
+        };
         p.segs = segs;
         p.error = None;
         if p.status == Status::Failed || p.status == Status::Working {
@@ -1474,7 +1470,11 @@ impl Workbench {
                 path,
             };
             match store::project_folder(&name) {
-                Ok(dir) => (dir.join("audio.wav"), Some(plan(dir.join("video.mp4"))), false),
+                Ok(dir) => (
+                    dir.join("audio.wav"),
+                    Some(plan(dir.join("video.mp4"))),
+                    false,
+                ),
                 Err(e) => {
                     eprintln!("saving into Movies: {e:#}");
                     (
@@ -1607,12 +1607,7 @@ impl Workbench {
     }
 
     /// Points the open video project at the copy in its Movies folder.
-    fn relocated(
-        &mut self,
-        job: u64,
-        result: Result<PathBuf, String>,
-        cx: &mut Context<Self>,
-    ) {
+    fn relocated(&mut self, job: u64, result: Result<PathBuf, String>, cx: &mut Context<Self>) {
         if job != self.extract.job {
             if let Ok(path) = result {
                 store::discard_owned(&path);

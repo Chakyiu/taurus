@@ -3,6 +3,7 @@ name = "taurus"
 version = "0.1.9"
 edition = "2024"
 description = "Taurus, a subtitle translation workbench"
+license = "MIT"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }

@@ -291,6 +291,10 @@ pub enum Sel {
     ExTo,
     /// The language an untranslated project is about to be translated into.
     TrTo,
+    /// Spoken language in the open project's settings.
+    ProjFrom,
+    /// Translation language in the open project's settings.
+    ProjTo,
     /// The language a summary is written in.
     SumLang,
     /// The chat model that writes a summary.
@@ -329,6 +333,12 @@ pub enum Dialog {
     },
     /// Adds a translation to a project made without one.
     Translate,
+    /// Spoken language and translation language for the open project.
+    Project {
+        from: String,
+        to: String,
+        translate: bool,
+    },
     /// Language, model, length and reasoning before a summary is written.
     Summarize {
         lang: String,
@@ -883,7 +893,7 @@ impl Workbench {
 
     /// Debug builds can open straight into a flow for screenshots:
     /// `TAURUS_IMPORT=a.srt,b.vtt`, `TAURUS_EXTRACT=video.mp4`,
-    /// `TAURUS_DIALOG=engines|capture|export|translate|about|correct`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
+    /// `TAURUS_DIALOG=engines|capture|export|translate|settings|about|correct`, `TAURUS_MENU=1`, `TAURUS_PLAY=<ms>`,
     /// `TAURUS_SPEAKERS=1`, `TAURUS_TRANSLATE=1`, `TAURUS_VIDEO=Entire screen|<app>`.
     fn debug_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !cfg!(debug_assertions) {
@@ -900,6 +910,7 @@ impl Workbench {
             Ok("capture") => self.open_capture(cx),
             Ok("export") => self.open_export(cx),
             Ok("translate") => self.open_translate(cx),
+            Ok("settings") => self.open_project_settings(cx),
             Ok("about") => self.open_about(cx),
             _ => {}
         }
@@ -1104,6 +1115,216 @@ impl Workbench {
         self.open_select = None;
         self.dialog = Some(Dialog::Translate);
         cx.notify();
+    }
+
+    /// The capture or extraction still filling this project, so its spoken
+    /// language is the one that job already started with.
+    pub(crate) fn project_listening(&self, pid: &str) -> bool {
+        let live =
+            self.live.project_id.as_deref() == Some(pid) && self.live.status != LiveStatus::Idle;
+        let draining = self.live.draining.as_ref().is_some_and(|(id, _)| id == pid);
+        live || draining || self.extracting(pid)
+    }
+
+    /// Spoken language and whether the lines are translated, for this project.
+    pub fn open_project_settings(&mut self, cx: &mut Context<Self>) {
+        let Some((from, to, translate)) = self
+            .current()
+            .map(|p| (p.from.clone(), p.to.clone(), p.translate))
+        else {
+            return;
+        };
+        self.open_select = None;
+        self.dialog = Some(Dialog::Project {
+            from,
+            to,
+            translate,
+        });
+        cx.notify();
+    }
+
+    pub fn set_project_translate(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(Dialog::Project {
+            translate,
+            from,
+            to,
+        }) = &mut self.dialog
+        {
+            *translate = on;
+            if *translate && to == from {
+                *to = other_lang(from);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn swap_project_langs(&mut self, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
+        if self.project_listening(&pid) {
+            return;
+        }
+        if let Some(Dialog::Project {
+            from,
+            to,
+            translate,
+        }) = &mut self.dialog
+            && *translate
+        {
+            std::mem::swap(from, to);
+        }
+        cx.notify();
+    }
+
+    /// Writes the dialog onto the project. A new spoken language, when there
+    /// is a recording, offers to read it again. A new translation language
+    /// rewrites the lines.
+    pub fn save_project_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (from, to, translate) = match &self.dialog {
+            Some(Dialog::Project {
+                from,
+                to,
+                translate,
+            }) => (from.clone(), to.clone(), *translate),
+            _ => return,
+        };
+        if translate && from == to {
+            return;
+        }
+        let Some(pid) = self.project_id.clone() else {
+            return;
+        };
+        let Some(p) = self.project(&pid) else {
+            return;
+        };
+        let old_from = p.from.clone();
+        let old_to = p.to.clone();
+        let old_translate = p.translate;
+        let lines = p.segs.len();
+        let has_audio = self.audio_source(p).is_some();
+        let listening = self.project_listening(&pid);
+        if let Some(p) = self.project_mut(&pid) {
+            p.from = from.clone();
+            p.to = to.clone();
+            p.translate = translate;
+        }
+        self.save_now();
+        self.close_dialog(window, cx);
+
+        let from_changed = from != old_from;
+        let to_changed = to != old_to;
+        let turned_on = translate && !old_translate;
+        let spoken = lang_name(&from);
+        let into = lang_name(&to);
+        let speech_blocked = from_changed && has_audio && !listening && !self.settings.asr_ready();
+        if speech_blocked {
+            self.toast(
+                format!(
+                    "Saved. The spoken language is now {spoken}, but speech recognition is not set up, so the recording is not read again."
+                ),
+                ToastKind::Warn,
+                Some(("Set up engines", ToastAction::Engines)),
+                cx,
+            );
+        }
+
+        if from_changed
+            && has_audio
+            && !listening
+            && self.reprocess.is_none()
+            && self.settings.asr_ready()
+        {
+            if lines > 0 {
+                let mut text = format!(
+                    "The spoken language is now {spoken}. The speech model replaces the {lines} lines, and edits on them are lost."
+                );
+                if translate && self.settings.mt_ready() {
+                    text.push_str(&format!(" They are then translated into {into}."));
+                }
+                text.push_str(" Cancel keeps the current lines.");
+                self.dialog = Some(Dialog::Confirm {
+                    title: "Read the recording again?".into(),
+                    text,
+                    ok_label: "Reprocess subtitle".into(),
+                    action: ConfirmAction::Reprocess(pid),
+                });
+                cx.notify();
+                return;
+            }
+            self.reprocess_subtitles(&pid, cx);
+            return;
+        }
+
+        if !listening && translate && (to_changed || turned_on) && lines > 0 {
+            if !self.settings.mt_ready() {
+                self.toast(
+                    format!("Saved. Translation is not set up yet, so the lines stay in {spoken}."),
+                    ToastKind::Warn,
+                    Some(("Set up engines", ToastAction::Engines)),
+                    cx,
+                );
+                return;
+            }
+            if to_changed {
+                let idx: Vec<usize> = self
+                    .project(&pid)
+                    .map(|p| {
+                        p.segs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, s)| !s.orig.trim().is_empty())
+                            .map(|(i, _)| i)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !idx.is_empty() {
+                    self.stop_editing(window, cx);
+                    self.editor.loading.extend(idx.iter().copied());
+                    self.translate_project(&pid, Some(idx), cx);
+                    return;
+                }
+            } else {
+                let pending = self.project(&pid).is_some_and(|p| {
+                    p.segs
+                        .iter()
+                        .any(|s| s.trans.trim().is_empty() && !s.orig.trim().is_empty())
+                });
+                if pending {
+                    self.translate_project(&pid, None, cx);
+                    return;
+                }
+            }
+        }
+
+        if speech_blocked {
+            return;
+        }
+        let changed = from_changed || to_changed || translate != old_translate;
+        let msg = if !changed {
+            "Saved.".into()
+        } else if listening {
+            if translate {
+                format!(
+                    "Saved. New lines are translated into {into}. This capture keeps listening in the language it started with."
+                )
+            } else {
+                "Saved. New lines are not translated. This capture keeps listening in the language it started with.".into()
+            }
+        } else if from_changed && !has_audio {
+            if translate {
+                format!(
+                    "Saved. These lines are marked as {spoken}, translated into {into}. The text stays as it is."
+                )
+            } else {
+                format!("Saved. These lines are marked as {spoken}. The text stays as it is.")
+            }
+        } else if translate {
+            format!("Saved. Spoken in {spoken}, translated into {into}.")
+        } else {
+            format!("Saved. Spoken in {spoken}.")
+        };
+        self.toast(msg, ToastKind::Ok, None, cx);
     }
 
     /// The remembered answer to "translate?" for the next capture or video.
@@ -1451,11 +1672,23 @@ impl Workbench {
                 .iter()
                 .map(|q| (q.key().to_string(), q.label().to_string()))
                 .collect(),
-            Sel::LiveFrom | Sel::LiveTo | Sel::ExFrom | Sel::ExTo | Sel::TrTo | Sel::SumLang => {
+            Sel::LiveFrom
+            | Sel::LiveTo
+            | Sel::ExFrom
+            | Sel::ExTo
+            | Sel::TrTo
+            | Sel::SumLang
+            | Sel::ProjFrom
+            | Sel::ProjTo => {
                 let mut v: Vec<(String, String)> = langs();
-                if let Some(Dialog::Summarize { lang, .. }) = &self.dialog {
-                    if !lang.is_empty() && !v.iter().any(|(c, _)| c == lang) {
-                        v.insert(0, (lang.clone(), lang_name(lang)));
+                let extras = match &self.dialog {
+                    Some(Dialog::Summarize { lang, .. }) if !lang.is_empty() => vec![lang.clone()],
+                    Some(Dialog::Project { from, to, .. }) => vec![from.clone(), to.clone()],
+                    _ => Vec::new(),
+                };
+                for lang in extras {
+                    if !lang.is_empty() && !v.iter().any(|(c, _)| c == &lang) {
+                        v.insert(0, (lang.clone(), lang_name(&lang)));
                     }
                 }
                 v
@@ -1493,6 +1726,14 @@ impl Workbench {
             Sel::ExFrom => self.extract.from.clone(),
             Sel::ExTo => self.extract.to.clone(),
             Sel::TrTo => self.current().map(|p| p.to.clone()).unwrap_or_default(),
+            Sel::ProjFrom => match &self.dialog {
+                Some(Dialog::Project { from, .. }) => from.clone(),
+                _ => "en".into(),
+            },
+            Sel::ProjTo => match &self.dialog {
+                Some(Dialog::Project { to, .. }) => to.clone(),
+                _ => "zh".into(),
+            },
             Sel::SumLang => match &self.dialog {
                 Some(Dialog::Summarize { lang, .. }) => lang.clone(),
                 _ => "en".into(),
@@ -1545,6 +1786,24 @@ impl Workbench {
             Sel::TrTo => {
                 if let Some(p) = self.current_mut() {
                     p.to = key;
+                }
+            }
+            Sel::ProjFrom => {
+                if let Some(Dialog::Project {
+                    from,
+                    to,
+                    translate,
+                }) = &mut self.dialog
+                {
+                    *from = key;
+                    if *translate && to == from {
+                        *to = other_lang(from);
+                    }
+                }
+            }
+            Sel::ProjTo => {
+                if let Some(Dialog::Project { to, .. }) = &mut self.dialog {
+                    *to = key;
                 }
             }
             Sel::SumLang => {
@@ -2382,6 +2641,11 @@ impl Workbench {
         self.exp.wrap = (self.exp.wrap as i32 + delta * 2).clamp(24, 60) as usize;
         cx.notify();
     }
+}
+
+/// The other side of a language pair, when the two selects would otherwise match.
+fn other_lang(code: &str) -> String {
+    if code == "en" { "zh" } else { "en" }.into()
 }
 
 impl Focusable for Workbench {

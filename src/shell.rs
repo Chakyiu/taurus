@@ -150,18 +150,29 @@ impl Workbench {
                             )
                         });
                     let can = !p.segs.is_empty();
-                    right = right.child(
-                        button(
-                            "top-export",
-                            Btn::Ghost,
-                            Some(Icon::Download),
-                            Some("Export"),
-                            !can,
+                    right = right
+                        .child(
+                            button(
+                                "top-settings",
+                                Btn::Quiet,
+                                Some(Icon::Sliders),
+                                (!bp.mobile()).then_some("Settings"),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.open_project_settings(cx))),
                         )
-                        .when(can, |d| {
-                            d.on_click(cx.listener(|this, _, _, cx| this.open_export(cx)))
-                        }),
-                    );
+                        .child(
+                            button(
+                                "top-export",
+                                Btn::Ghost,
+                                Some(Icon::Download),
+                                Some("Export"),
+                                !can,
+                            )
+                            .when(can, |d| {
+                                d.on_click(cx.listener(|this, _, _, cx| this.open_export(cx)))
+                            }),
+                        );
                 }
             }
         }
@@ -593,7 +604,10 @@ impl Workbench {
             Dialog::Term { .. } => 520.,
             Dialog::Capture | Dialog::Extract | Dialog::Export => 480.,
             Dialog::Confirm { .. } | Dialog::Rename { .. } | Dialog::Translate => 400.,
-            Dialog::Summarize { .. } | Dialog::About | Dialog::Correct { .. } => 440.,
+            Dialog::Summarize { .. }
+            | Dialog::About
+            | Dialog::Correct { .. }
+            | Dialog::Project { .. } => 440.,
         };
         let max_w = px(f32::min(width, bp.w - 32.));
         let mut extra: Option<AnyElement> = None;
@@ -714,6 +728,93 @@ impl Workbench {
                         }),
                     button("dlg-ok", Btn::Primary, Some(Icon::Translate), Some("Translate"), false)
                         .on_click(cx.listener(|this, _, w, cx| this.translate_now(w, cx))),
+                )
+            }
+            Dialog::Project {
+                from,
+                to,
+                translate,
+            } => {
+                let translate = *translate;
+                let same = translate && from == to;
+                let locked = self
+                    .current()
+                    .is_some_and(|p| self.project_listening(&p.id));
+                let has_audio = self
+                    .current()
+                    .is_some_and(|p| self.audio_source(p).is_some());
+                let note = if locked {
+                    "This capture is still listening, so the spoken language stays as it started. New lines use the translation you save."
+                } else if has_audio {
+                    "The speech model uses the spoken language the next time it reads the recording. A different translation language rewrites the lines."
+                } else {
+                    "The spoken language names these lines. There is no recording to read again, so the text stays as it is."
+                };
+                (
+                    row()
+                        .gap(px(10.))
+                        .child(title_el("Project settings".into()))
+                        .child(close_btn(cx)),
+                    col()
+                        .gap(px(16.))
+                        .child(field(
+                            "Spoken in",
+                            self.render_select(Sel::ProjFrom, px(220.), locked, cx),
+                        ))
+                        .child(
+                            switch("proj-translate", translate, "Translate the lines").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.set_project_translate(!translate, cx)
+                                }),
+                            ),
+                        )
+                        .when(translate, |d| {
+                            d.child(
+                                row()
+                                    .items_end()
+                                    .gap(px(8.))
+                                    .child(div().flex_1().min_w_0().child(field(
+                                        "Translate to",
+                                        self.render_select(Sel::ProjTo, px(0.), false, cx),
+                                    )))
+                                    .child(
+                                        button(
+                                            "proj-swap",
+                                            Btn::Icon,
+                                            Some(Icon::Swap),
+                                            None,
+                                            locked,
+                                        )
+                                        .when(
+                                            !locked,
+                                            |d| {
+                                                d.on_click(cx.listener(|this, _, _, cx| {
+                                                    this.swap_project_langs(cx)
+                                                }))
+                                            },
+                                        ),
+                                    ),
+                            )
+                        })
+                        .when(same, |d| {
+                            d.child(hint("Choose another language to translate into."))
+                        })
+                        .child(hint(note))
+                        .when(translate && !self.settings.mt_ready(), |d| {
+                            d.child(
+                                row()
+                                    .flex_wrap()
+                                    .text_size(t::T_SMALL)
+                                    .text_color(t::warn_text())
+                                    .child("Translation is not set up yet.\u{00A0}")
+                                    .child(link_button("proj-engines", "Set up engines").on_click(
+                                        cx.listener(|this, _, w, cx| this.open_engines(w, cx)),
+                                    )),
+                            )
+                        }),
+                    button("dlg-ok", Btn::Primary, None, Some("Save"), same).when(!same, |d| {
+                        d.on_click(cx.listener(|this, _, w, cx| this.save_project_settings(w, cx)))
+                    }),
                 )
             }
             Dialog::Summarize {
@@ -1096,6 +1197,7 @@ impl Workbench {
                     .line_height(relative(1.6))
                     .child("A subtitle workbench for macOS: caption live audio, transcribe videos, tell speakers apart, and translate, all on your own Mac."),
             )
+            .child(hint("Released under the MIT License."))
             .child(
                 col()
                     .gap(px(10.))
