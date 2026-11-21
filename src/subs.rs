@@ -35,8 +35,17 @@ pub fn parse(file_name: &str, text: &str) -> Result<Vec<Segment>> {
 fn parse_cues(text: &str, vtt: bool) -> Vec<Segment> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = Vec::new();
-    for block in text.split("\n\n") {
-        let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+    // A cue ends at a line that is blank once trimmed: some writers leave spaces or a
+    // tab on the separator, and keying on a literal "\n\n" folded the next cue into this one.
+    let mut blocks: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            blocks.push(Vec::new());
+        } else if let Some(block) = blocks.last_mut() {
+            block.push(line);
+        }
+    }
+    for lines in blocks {
         let Some(ti) = lines.iter().position(|l| l.contains("-->")) else {
             continue;
         };
@@ -146,18 +155,33 @@ pub fn parse_time(s: &str) -> Option<i64> {
     Some(((h * 60 + m) * 60 + sec) * 1000 + ms)
 }
 
-fn strip_tags(line: &str) -> String {
+/// Drops every balanced `open…close` span, and gives up (returns `None`) when one is
+/// never closed — dropping to the end of the line would swallow real text.
+fn strip_pairs(s: &str, open: char, close: char) -> Option<String> {
     let mut out = String::new();
     let mut depth = 0;
-    for c in line.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' if depth > 0 => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
+    for c in s.chars() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                out.push(c);
+            }
+        } else if depth == 0 {
+            out.push(c);
         }
     }
-    let out = out
+    (depth == 0).then_some(out)
+}
+
+fn strip_tags(line: &str) -> String {
+    // `if x < 10 then stop` is text with a stray `<`, not an unclosed tag.
+    let Some(tagless) = strip_pairs(line, '<', '>') else {
+        return line.trim().to_string();
+    };
+    let out = tagless
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -166,17 +190,7 @@ fn strip_tags(line: &str) -> String {
 }
 
 fn strip_braces(s: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0;
-    for c in s.chars() {
-        match c {
-            '{' => depth += 1,
-            '}' if depth > 0 => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
+    strip_pairs(s, '{', '}').unwrap_or_else(|| s.to_string())
 }
 
 fn strip_ass(t: &str) -> String {
@@ -286,5 +300,48 @@ mod tests {
         assert_eq!(guess_lang("x.srt", &segs), "zh");
         assert_eq!(guess_lang("show.de.srt", &segs), "de");
         assert_eq!(guess_lang("show.eng.srt", &[]), "en");
+    }
+
+    #[test]
+    fn keeps_text_after_unclosed_angle_bracket() {
+        let s = "1\n00:00:01,000 --> 00:00:02,000\nif x < 10 then stop\n";
+        assert_eq!(parse("a.srt", s).unwrap()[0].orig, "if x < 10 then stop");
+    }
+
+    #[test]
+    fn keeps_text_after_unclosed_brace() {
+        let s = "1\n00:00:01,000 --> 00:00:02,000\nif x { stop later\n";
+        assert_eq!(parse("a.srt", s).unwrap()[0].orig, "if x { stop later");
+    }
+
+    #[test]
+    fn keeps_unclosed_tag_text_in_vtt() {
+        let s = "WEBVTT\n\n00:01.000 --> 00:02.000\na < b and {c\n";
+        assert_eq!(parse("a.vtt", s).unwrap()[0].orig, "a < b and {c");
+    }
+
+    #[test]
+    fn strips_well_formed_tags() {
+        let s = "WEBVTT\n\n00:01.000 --> 00:02.000\n<i>Hello</i> {an8}there\n";
+        assert_eq!(parse("a.vtt", s).unwrap()[0].orig, "Hello there");
+    }
+
+    #[test]
+    fn splits_srt_on_space_only_separator() {
+        let s = "1\n00:00:01,000 --> 00:00:02,000\nOne\n  \n2\n00:00:03,000 --> 00:00:04,000\nTwo\n";
+        let segs = parse("a.srt", s).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].orig, "One");
+        assert_eq!(segs[1].orig, "Two");
+        assert_eq!(segs[1].in_ms, 3000);
+    }
+
+    #[test]
+    fn splits_vtt_on_tab_separator() {
+        let s = "WEBVTT\n\n00:01.000 --> 00:02.000\nOne\n\t\n00:03.000 --> 00:04.000\nTwo\n";
+        let segs = parse("a.vtt", s).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].orig, "Two");
+        assert_eq!(segs[1].in_ms, 3000);
     }
 }
