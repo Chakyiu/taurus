@@ -328,7 +328,8 @@ mod tests {
 
     #[test]
     fn splits_srt_on_space_only_separator() {
-        let s = "1\n00:00:01,000 --> 00:00:02,000\nOne\n  \n2\n00:00:03,000 --> 00:00:04,000\nTwo\n";
+        let s =
+            "1\n00:00:01,000 --> 00:00:02,000\nOne\n  \n2\n00:00:03,000 --> 00:00:04,000\nTwo\n";
         let segs = parse("a.srt", s).unwrap();
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].orig, "One");
