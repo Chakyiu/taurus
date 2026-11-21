@@ -30,11 +30,21 @@ jobs:
         run: xcodebuild -version && xcrun --show-sdk-version
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Format
+        run: cargo fmt --all --check
+
       - name: Build
         run: cargo build --locked --all-targets
+
+      # Warnings are errors: this project has no other place to lint, so a
+      # warning that lands unnoticed here never gets read.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Unit tests
         run: cargo test --locked
