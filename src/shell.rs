@@ -239,7 +239,7 @@ impl Workbench {
             ),
             Status::Failed => ("Failed".into(), t::danger_text()),
             Status::Review => {
-                let open = project_stats(&self.glossary, p).flagged;
+                let open = self.cached_project_stats(p).flagged;
                 (
                     match open {
                         1 => "1 line to check".into(),
