@@ -102,8 +102,9 @@ fn e2e_probe_and_extract_subtitles() {
     );
     assert_eq!(p.subs.len(), 1);
     assert_eq!(p.audio.len(), 1);
-    assert_eq!(p.subs[0].cues, Some(2));
+    assert_eq!(p.subs[0].cues, None);
     let segs = media::extract_subtitle(&video, p.subs[0].stream).unwrap();
+    assert_eq!(segs.len(), 2);
     assert_eq!(segs[1].orig, LINES[1]);
 }
 
