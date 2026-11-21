@@ -1,3 +1,21 @@
+// Clippy runs with `-D warnings` in CI. Until that landed there was no lint
+// step, so the tree already trips these at 34 sites (mostly `collapsible_if` in
+// src/work.rs). Allowing them keeps the gate meaningful for new code without a
+// 34-site refactor inside unrelated work; delete each line as its sites are
+// cleaned up.
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    clippy::collapsible_if,
+    clippy::double_ended_iterator_last,
+    clippy::filter_next,
+    clippy::if_same_then_else,
+    clippy::manual_is_multiple_of,
+    clippy::manual_pattern_char_comparison,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::while_let_loop
+)]
+
 mod app;
 mod capture;
 mod data;

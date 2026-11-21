@@ -376,6 +376,18 @@ pub(crate) fn check(
     bail!("{} {}", status.as_u16(), msg.trim())
 }
 
+pub(crate) fn friendly(e: &anyhow::Error, url: &str) -> String {
+    let text = format!("{e:#}");
+    if text.contains("Connection refused")
+        || text.contains("ConnectionFailed")
+        || text.contains("connect")
+    {
+        format!("nothing is answering at {url}")
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,17 +412,5 @@ mod tests {
     #[test]
     fn accepts_a_body_of_the_announced_length() {
         assert!(whole_body(142 << 20, 142 << 20).is_ok());
-    }
-}
-
-pub(crate) fn friendly(e: &anyhow::Error, url: &str) -> String {
-    let text = format!("{e:#}");
-    if text.contains("Connection refused")
-        || text.contains("ConnectionFailed")
-        || text.contains("connect")
-    {
-        format!("nothing is answering at {url}")
-    } else {
-        text
     }
 }
