@@ -185,8 +185,8 @@ impl Segment {
     }
 }
 
-/// A finished track: every cue translated, inside the 17 cps and 42-character
-/// limits, with readable gaps.
+/// A finished track: every cue translated, inside the reading-speed and
+/// line-length limits, with readable gaps.
 #[cfg(test)]
 fn srt_segments() -> Vec<Segment> {
     [
@@ -289,7 +289,8 @@ fn talk_segments() -> Vec<Segment> {
             let start = 4200 + i as i64 * 6400;
             let plain = strip_marks(l.en);
             let dur = (char_len(&plain) as f64 * 58.0).round().max(2200.0) as i64;
-            Segment::new(start, start + dur, &plain, &strip_marks(l.zh))
+            let zh = wrap_line(&strip_marks(l.zh), MAX_LINE_CJK).join("\n");
+            Segment::new(start, start + dur, &plain, &zh)
         })
         .collect()
 }
@@ -937,6 +938,10 @@ pub struct Flag {
 
 pub const MAX_CPS: f64 = 17.0;
 pub const MAX_LINE: usize = 42;
+/// A Chinese, Japanese or Korean character is about twice the width of a
+/// Latin one, so a CJK line holds about half as many characters.
+pub const MAX_CPS_CJK: f64 = 15.0;
+pub const MAX_LINE_CJK: usize = 16;
 pub const MIN_GAP_MS: i64 = 80;
 
 pub fn longest_line(text: &str) -> usize {
@@ -1068,6 +1073,16 @@ fn refresh_flag_cache(glossary: &[Term], p: &Project, cache: &mut FlagCache) -> 
     recomputed
 }
 
+/// The reading-speed and line-length limits that apply to a line: the CJK pair
+/// when the line is written in CJK, the Latin pair otherwise.
+pub fn limits_for(text: &str) -> (f64, usize) {
+    if text.chars().any(is_cjk_char) {
+        (MAX_CPS_CJK, MAX_LINE_CJK)
+    } else {
+        (MAX_CPS, MAX_LINE)
+    }
+}
+
 pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
     let segs = &p.segs;
     let project_id = Some(p.id.as_str());
@@ -1083,12 +1098,13 @@ pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
     if text.is_empty() {
         out.push(flag(FlagKind::Empty, "empty".into()));
     } else {
+        let (max_cps, max_line) = limits_for(text);
         let cps = char_len(text) as f64 / dur;
-        if cps > MAX_CPS {
+        if cps > max_cps {
             out.push(flag(FlagKind::Fast, format!("{} cps", cps.round() as i64)));
         }
         let longest = longest_line(text);
-        if longest > MAX_LINE {
+        if longest > max_line {
             out.push(flag(FlagKind::Long, format!("{longest} ch")));
         }
     }
@@ -1413,6 +1429,7 @@ pub fn wrap_line(text: &str, max: usize) -> Vec<String> {
         .join(" ")
         .trim()
         .to_string();
+    let max = max.max(1);
     if t.is_empty() {
         return Vec::new();
     }
@@ -1420,26 +1437,61 @@ pub fn wrap_line(text: &str, max: usize) -> Vec<String> {
         return vec![t];
     }
     if !t.contains(' ') {
-        let chars: Vec<char> = t.chars().collect();
-        return chars.chunks(max).map(|c| c.iter().collect()).collect();
+        return chunk_chars(&t, max);
     }
     let mut out = Vec::new();
     let mut cur = String::new();
-    for w in t.split(' ') {
-        if cur.is_empty() {
-            cur = w.to_string();
-        } else if char_len(&cur) + 1 + char_len(w) <= max {
+    for w in t.split_whitespace() {
+        if !cur.is_empty() && char_len(&cur) + 1 + char_len(w) <= max {
             cur.push(' ');
             cur.push_str(w);
-        } else {
-            out.push(std::mem::take(&mut cur));
-            cur = w.to_string();
+            continue;
         }
+        if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if char_len(w) <= max {
+            cur = w.to_string();
+            continue;
+        }
+        // One token wider than the wrap width (a URL, a long German compound)
+        // is broken by character, so no exported line goes over the limit.
+        let mut chunks = chunk_chars(w, max);
+        cur = chunks.pop().unwrap_or_default();
+        out.extend(chunks);
     }
     if !cur.is_empty() {
         out.push(cur);
     }
     out
+}
+
+fn chunk_chars(s: &str, max: usize) -> Vec<String> {
+    s.chars()
+        .collect::<Vec<_>>()
+        .chunks(max)
+        .map(|c| c.iter().collect())
+        .collect()
+}
+
+/// Merged cues join with a space in Latin text and with nothing when neither
+/// line has a space of its own and at least one is CJK: Chinese and Japanese
+/// are written without spaces.
+fn join_lines(a: &str, b: &str) -> String {
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() {
+        return b.to_string();
+    }
+    if b.is_empty() {
+        return a.to_string();
+    }
+    let cjk = a.chars().any(is_cjk_char) || b.chars().any(is_cjk_char);
+    if cjk && !a.contains(' ') && !b.contains(' ') {
+        format!("{a}{b}")
+    } else {
+        format!("{a} {b}")
+    }
 }
 
 struct Cue {
@@ -1460,8 +1512,8 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
             if let Some(last) = cues.last_mut() {
                 if s.in_ms - last.out_ms < 120 && (!o.speakers || last.speaker == s.speaker) {
                     last.out_ms = s.out_ms;
-                    last.trans = format!("{} {}", last.trans, s.trans).trim().to_string();
-                    last.orig = format!("{} {}", last.orig, s.orig).trim().to_string();
+                    last.trans = join_lines(&last.trans, &s.trans);
+                    last.orig = join_lines(&last.orig, &s.orig);
                     continue;
                 }
             }
@@ -1762,6 +1814,87 @@ mod tests {
     fn wraps_by_words_and_chars() {
         assert_eq!(wrap_line("a b c", 3), vec!["a b", "c"]);
         assert_eq!(wrap_line("一二三四五", 2), vec!["一二", "三四", "五"]);
+    }
+
+    #[test]
+    fn breaks_a_token_wider_than_the_wrap() {
+        assert_eq!(
+            wrap_line("see https://example.com/very/long/path 1", 12),
+            vec!["see", "https://exam", "ple.com/very", "/long/path 1"]
+        );
+        let lines = wrap_line("Donaudampfschifffahrtsgesellschaft mbH", 8);
+        assert!(lines.iter().all(|l| char_len(l) <= 8), "{lines:?}");
+    }
+
+    #[test]
+    fn cjk_lines_use_the_shorter_limits() {
+        assert_eq!(limits_for("一二三"), (MAX_CPS_CJK, MAX_LINE_CJK));
+        assert_eq!(limits_for("abc"), (MAX_CPS, MAX_LINE));
+        let mut p = Project::new(
+            "t".into(),
+            Kind::Subtitle,
+            "talk".into(),
+            "talk.srt".into(),
+            None,
+            Status::Done,
+            "zh",
+            "en",
+            vec![Segment::new(0, 4000, &"字".repeat(32), "")],
+        );
+        p.translate = false;
+        let kinds = |p: &Project| -> Vec<FlagKind> {
+            flags_for(&[], p, 0).into_iter().map(|f| f.kind).collect()
+        };
+        assert!(kinds(&p).contains(&FlagKind::Long), "32 CJK characters");
+        p.segs[0].out_ms = 2000;
+        assert!(
+            kinds(&p).contains(&FlagKind::Fast),
+            "32 CJK characters in 2 s is 16 cps"
+        );
+        p.segs[0].orig = "这是一条正常长度的中文字幕行".into();
+        assert_eq!(kinds(&p), vec![FlagKind::Ok], "14 characters in 2 s");
+        // A Latin line of the same length stays under its own limits.
+        p.segs[0].out_ms = 4000;
+        p.segs[0].orig = "ab".repeat(21);
+        assert_eq!(kinds(&p), vec![FlagKind::Ok], "42 Latin characters");
+    }
+
+    #[test]
+    fn merged_cues_join_the_way_their_text_is_written() {
+        let export = |orig: [&str; 2], trans: [&str; 2]| -> String {
+            let mut p = Project::new(
+                "t".into(),
+                Kind::Subtitle,
+                "talk".into(),
+                "talk.srt".into(),
+                None,
+                Status::Done,
+                "zh",
+                "en",
+                vec![
+                    Segment::new(0, 1000, orig[0], trans[0]),
+                    Segment::new(1050, 2000, orig[1], trans[1]),
+                ],
+            );
+            p.translate = false;
+            let b = build_export(
+                &[],
+                &p,
+                &ExportOptions {
+                    format: Format::Srt,
+                    layout: Layout::Orig,
+                    wrap: 42,
+                    merge: true,
+                    skip_flagged: false,
+                    bom: false,
+                    speakers: false,
+                },
+            );
+            assert_eq!(b.count, 1, "{}", b.text);
+            b.text
+        };
+        assert!(export(["第一句", "第二句"], ["One.", "Two."]).contains("第一句第二句"));
+        assert!(export(["First", "second"], ["一。", "二。"]).contains("First second"));
     }
 
     #[test]

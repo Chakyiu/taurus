@@ -888,8 +888,9 @@ impl Workbench {
             part(format!("{dur:.1} s"), false),
         ];
         if !text.is_empty() {
-            parts.push(part(format!("{cps:.0} chars/s"), cps > MAX_CPS));
-            parts.push(part(format!("longest line {longest}"), longest > MAX_LINE));
+            let (max_cps, max_line) = limits_for(text);
+            parts.push(part(format!("{cps:.0} chars/s"), cps > max_cps));
+            parts.push(part(format!("longest line {longest}"), longest > max_line));
         }
         if let Some(g) = gap {
             parts.push(part(format!("{g} ms to next"), g < MIN_GAP_MS));
