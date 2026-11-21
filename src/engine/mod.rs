@@ -309,11 +309,30 @@ pub(crate) fn fetch(
     }
     file.flush()?;
     drop(file);
-    if total > 0 && done < total {
+    if let Err(e) = whole_body(done, total) {
         let _ = std::fs::remove_file(&tmp);
-        bail!("the download ended early");
+        return Err(e);
     }
     std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// Whether a finished body can be installed. A body the server gave no length
+/// for cannot be checked at all, and one shorter than the announced length was
+/// cut off; both are dropped rather than renamed into place, where Whisper
+/// would treat any file over 1 MB as a model that is there.
+fn whole_body(done: u64, announced: u64) -> Result<()> {
+    if announced == 0 {
+        bail!(
+            "the server did not say how large the download is, so a cut-off body cannot be spotted; nothing was installed"
+        );
+    }
+    if done < announced {
+        bail!("the download ended early ({} of {} bytes)", done, announced);
+    }
+    if done > announced {
+        bail!("the download is longer than the server announced");
+    }
     Ok(())
 }
 
@@ -355,6 +374,33 @@ pub(crate) fn check(
         })
         .unwrap_or_else(|| body.chars().take(200).collect());
     bail!("{} {}", status.as_u16(), msg.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_a_body_with_no_length() {
+        assert!(whole_body(400 << 20, 0).is_err());
+        assert!(whole_body(0, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_a_short_body() {
+        assert!(whole_body((142 << 20) - 1, 142 << 20).is_err());
+        assert!(whole_body(1 << 20, 400 << 20).is_err());
+    }
+
+    #[test]
+    fn rejects_a_body_longer_than_announced() {
+        assert!(whole_body((142 << 20) + 1, 142 << 20).is_err());
+    }
+
+    #[test]
+    fn accepts_a_body_of_the_announced_length() {
+        assert!(whole_body(142 << 20, 142 << 20).is_ok());
+    }
 }
 
 pub(crate) fn friendly(e: &anyhow::Error, url: &str) -> String {
