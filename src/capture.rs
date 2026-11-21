@@ -208,19 +208,48 @@ fn display_for_windows(windows: &[Rect], displays: &[Rect]) -> Option<usize> {
     Some(best)
 }
 
-/// The movie's pixel size for a display of `points` at `scale` pixels per point.
-/// Full quality keeps the display's own pixels up to 4K across; the other
-/// qualities cap the height. Both sides are rounded down to even numbers.
-fn movie_size(points: (u32, u32), scale: f64, quality: VideoQuality) -> (u32, u32) {
-    let scale = scale.max(1.0);
-    let w = points.0.max(1) as f64 * scale;
-    let h = points.1.max(1) as f64 * scale;
+/// The movie's size for a display whose current mode is `pixels` wide and
+/// tall: that size itself, capped. Full quality keeps the display's own pixels
+/// up to 4K across; the other qualities cap the height. Both sides are rounded
+/// down to even numbers.
+fn movie_size(pixels: (u32, u32), quality: VideoQuality) -> (u32, u32) {
+    let w = pixels.0.max(1) as f64;
+    let h = pixels.1.max(1) as f64;
     let shrink = match quality.max_height() {
         Some(max) => (max as f64 / h).min(1.0),
         None => (3840.0 / w).min(1.0),
     };
     let even = |v: f64| ((v.round() as u32) / 2 * 2).max(2);
     (even(w * shrink), even(h * shrink))
+}
+
+#[cfg_attr(
+    target_vendor = "apple",
+    link(name = "CoreGraphics", kind = "framework")
+)]
+unsafe extern "C" {
+    fn CGDisplayCopyDisplayMode(display: u32) -> *mut std::ffi::c_void;
+    fn CGDisplayModeGetPixelWidth(mode: *mut std::ffi::c_void) -> usize;
+    fn CGDisplayModeGetPixelHeight(mode: *mut std::ffi::c_void) -> usize;
+    fn CGDisplayModeRelease(mode: *mut std::ffi::c_void);
+}
+
+/// The pixel size macOS reports for the display's current mode, which is the
+/// display's own resolution: a 1512x982-point Retina screen answers
+/// 3024x1964 here. `None` when the display has no mode to read.
+fn display_pixels(id: u32) -> Option<(u32, u32)> {
+    unsafe {
+        let mode = CGDisplayCopyDisplayMode(id);
+        if mode.is_null() {
+            return None;
+        }
+        let (w, h) = (
+            CGDisplayModeGetPixelWidth(mode),
+            CGDisplayModeGetPixelHeight(mode),
+        );
+        CGDisplayModeRelease(mode);
+        (w > 0 && h > 0).then(|| (w as u32, h as u32))
+    }
 }
 
 /// Records `target` (`WHOLE_SCREEN` or an app name) to an H.264 movie at
@@ -300,19 +329,19 @@ pub fn record_screen(
     }
     .map_err(|e| anyhow!("could not set up the screen recording: {e}"))?;
 
-    // ScreenCaptureKit reports the display in points; the movie wants pixels,
-    // so use this display's own point-to-pixel scale instead of assuming Retina.
-    let (points, scale) = (
-        (display.width(), display.height()),
-        f64::from(filter.point_pixel_scale()),
-    );
-    let (w, h) = movie_size(points, scale, quality);
+    // `SCDisplay`'s own width and height are points, and the movie wants the
+    // display's pixels, which macOS reports per display mode. Asking for
+    // anything else gets the picture scaled up and blurry on Retina.
+    let points = (display.width(), display.height());
+    let pixels = display_pixels(display.display_id()).unwrap_or(points);
+    let (w, h) = movie_size(pixels, quality);
     eprintln!(
-        "taurus: recording display {} ({}x{} points at {}x) as {w}x{h}",
+        "taurus: recording display {} ({}x{} points, {}x{} pixels) as {w}x{h}",
         display.display_id(),
         points.0,
         points.1,
-        scale
+        pixels.0,
+        pixels.1
     );
     let config = SCStreamConfiguration::new()
         .with_width(w)
@@ -684,50 +713,33 @@ mod tests {
 
     #[test]
     fn a_one_x_display_is_asked_for_its_own_pixels() {
+        assert_eq!(movie_size((1920, 1080), VideoQuality::Full), (1920, 1080));
         assert_eq!(
-            movie_size((1920, 1080), 1.0, VideoQuality::Full),
+            movie_size((1920, 1080), VideoQuality::Standard),
             (1920, 1080)
         );
-        assert_eq!(
-            movie_size((1920, 1080), 1.0, VideoQuality::Standard),
-            (1920, 1080)
-        );
-        assert_eq!(
-            movie_size((1920, 1080), 1.0, VideoQuality::Small),
-            (1280, 720)
-        );
+        assert_eq!(movie_size((1920, 1080), VideoQuality::Small), (1280, 720));
     }
 
     #[test]
     fn a_retina_display_keeps_every_pixel() {
+        // What macOS reports for a 1512x982-point Retina screen.
+        assert_eq!(movie_size((3024, 1964), VideoQuality::Full), (3024, 1964));
         assert_eq!(
-            movie_size((1512, 982), 2.0, VideoQuality::Full),
-            (3024, 1964)
-        );
-        assert_eq!(
-            movie_size((1512, 982), 2.0, VideoQuality::Standard),
+            movie_size((3024, 1964), VideoQuality::Standard),
             (1662, 1080)
         );
-        assert_eq!(
-            movie_size((1512, 982), 2.0, VideoQuality::Small),
-            (1108, 720)
-        );
+        assert_eq!(movie_size((3024, 1964), VideoQuality::Small), (1108, 720));
     }
 
     #[test]
     fn a_movie_is_capped_at_4k_across() {
-        assert_eq!(
-            movie_size((5120, 1440), 1.0, VideoQuality::Full),
-            (3840, 1080)
-        );
+        assert_eq!(movie_size((5120, 1440), VideoQuality::Full), (3840, 1080));
     }
 
     #[test]
-    fn an_unreported_scale_is_taken_as_one() {
-        assert_eq!(
-            movie_size((1920, 1080), 0.0, VideoQuality::Full),
-            (1920, 1080)
-        );
+    fn a_display_that_reports_nothing_still_gets_a_valid_size() {
+        assert_eq!(movie_size((0, 0), VideoQuality::Full), (2, 2));
     }
 
     #[test]
