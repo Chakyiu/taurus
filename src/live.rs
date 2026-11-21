@@ -14,7 +14,7 @@ use anyhow::Result;
 
 use crate::capture::{self, Capture, CaptureKind};
 use crate::engine::Settings;
-use crate::engine::asr::{Engine, resegment, rms};
+use crate::engine::asr::{AsrSeg, Engine, resegment, rms};
 use crate::media::SAMPLE_RATE;
 use crate::store;
 use crate::subs::is_cjk;
@@ -140,6 +140,9 @@ const FRAME: usize = SAMPLE_RATE / 50; // 20 ms
 const PRE_ROLL: usize = SAMPLE_RATE * 3 / 10;
 const COMMIT_SILENCE_MS: usize = 650;
 const MAX_LINE_MS: usize = 9_000;
+/// Stands in for a stretch the recogniser could not read, so the words are
+/// visibly missing instead of silently dropped.
+pub const MISSED_CUE: &str = "[audio not transcribed]";
 
 struct Worker {
     engine: Engine,
@@ -157,7 +160,7 @@ struct Worker {
     partial_len: usize,
     level_acc: Vec<f32>,
     recent: std::collections::VecDeque<f32>,
-    errors: usize,
+    alerts: Alerts,
     recording: Option<Recording>,
 }
 
@@ -184,7 +187,7 @@ impl Worker {
             partial_len: 0,
             level_acc: Vec::new(),
             recent: std::collections::VecDeque::with_capacity(PRE_ROLL + FRAME),
-            errors: 0,
+            alerts: Alerts::default(),
             recording: Some(recording),
         }
     }
@@ -317,7 +320,7 @@ impl Worker {
                     .collect::<Vec<_>>()
                     .join(sep);
                 let _ = self.tx.send(LiveEvent::Partial(text));
-                self.errors = 0;
+                self.alerts.recovered();
             }
             Err(e) => self.error(e),
         }
@@ -334,38 +337,103 @@ impl Worker {
         let base = self.offset_ms + (start * 1000 / SAMPLE_RATE) as i64;
         let dur = (pcm.len() * 1000 / SAMPLE_RATE) as i64;
         self.reset();
-        match self.engine.transcribe(&pcm, &self.lang, true, None) {
-            Ok(segs) => {
-                let segs = resegment(segs, is_cjk(&self.lang));
-                for s in segs {
-                    let text = s.text.trim().to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let _ = self.tx.send(LiveEvent::Final {
-                        start_ms: base + s.start_ms.clamp(0, dur),
-                        end_ms: base + s.end_ms.clamp(0, dur).max(s.start_ms + 300),
-                        text,
-                    });
-                }
-                self.errors = 0;
-            }
-            Err(e) => self.error(e),
-        }
+        let language = self.lang.as_str();
+        let engine = &self.engine;
+        commit_stretch(
+            &mut || engine.transcribe(&pcm, language, true, None),
+            &self.tx,
+            &mut self.alerts,
+            base,
+            dur,
+            is_cjk(language),
+        );
         let _ = self.tx.send(LiveEvent::Partial(String::new()));
     }
 
     fn error(&mut self, e: anyhow::Error) {
-        self.errors += 1;
-        // One message per run of failures, not one per second.
-        if self.errors == 1 {
-            let _ = self.tx.send(LiveEvent::Error(format!("{e:#}")));
+        if let Some(text) = self.alerts.report(&e) {
+            let _ = self.tx.send(LiveEvent::Error(text));
         }
+    }
+}
+
+/// Commits one stretch of speech. The recogniser gets one more go at the same
+/// audio, and when that fails too the stretch still reaches the cue list, as a
+/// marked line rather than nothing at all.
+fn commit_stretch(
+    attempt: &mut dyn FnMut() -> Result<Vec<AsrSeg>>,
+    tx: &Sender<LiveEvent>,
+    alerts: &mut Alerts,
+    base: i64,
+    dur: i64,
+    cjk: bool,
+) {
+    match transcribe_with_retry(attempt) {
+        Ok(segs) => {
+            for s in resegment(segs, cjk) {
+                let text = s.text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let _ = tx.send(LiveEvent::Final {
+                    start_ms: base + s.start_ms.clamp(0, dur),
+                    end_ms: base + s.end_ms.clamp(0, dur).max(s.start_ms + 300),
+                    text,
+                });
+            }
+            alerts.recovered();
+        }
+        Err(e) => {
+            let _ = tx.send(LiveEvent::Final {
+                start_ms: base,
+                end_ms: base + dur.max(300),
+                text: MISSED_CUE.to_string(),
+            });
+            if let Some(text) = alerts.report(&e) {
+                let _ = tx.send(LiveEvent::Error(text));
+            }
+        }
+    }
+}
+
+/// One retry of the same audio: a transient failure often passes the second time.
+fn transcribe_with_retry(attempt: &mut dyn FnMut() -> Result<Vec<AsrSeg>>) -> Result<Vec<AsrSeg>> {
+    match attempt() {
+        Err(_) => attempt(),
+        ok => ok,
+    }
+}
+
+/// The failures already shown to the user. One message per run of failures,
+/// but a different message is news even while the first one is still repeating.
+#[derive(Default)]
+struct Alerts {
+    last: Option<String>,
+}
+
+impl Alerts {
+    /// The text to show, or `None` when this is the same failure as last time.
+    fn report(&mut self, e: &anyhow::Error) -> Option<String> {
+        let text = format!("{e:#}");
+        if self.last.as_deref() == Some(text.as_str()) {
+            return None;
+        }
+        self.last = Some(text.clone());
+        Some(text)
+    }
+
+    fn recovered(&mut self) {
+        self.last = None;
     }
 }
 
 /// A 16-bit mono WAV written as it is heard. The header is brought up to date
 /// every few seconds, so a crash still leaves a playable file.
+///
+/// RIFF counts bytes in a `u32`, so the file stops at the last sample the
+/// header can describe — about 37.3 hours at 16 kHz, 16-bit mono.
+const MAX_SAMPLES: u64 = (u32::MAX as u64 - 36) / 2;
+
 struct Recording {
     path: PathBuf,
     out: BufWriter<File>,
@@ -403,14 +471,24 @@ impl Recording {
     }
 
     fn push(&mut self, pcm: &[f32]) -> std::io::Result<()> {
-        for s in pcm {
+        let room = (MAX_SAMPLES - self.samples.min(MAX_SAMPLES)) as usize;
+        let take = pcm.len().min(room);
+        for s in &pcm[..take] {
             self.out
                 .write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
         }
-        self.samples += pcm.len() as u64;
-        self.unpatched += pcm.len();
+        self.samples += take as u64;
+        self.unpatched += take;
         if self.unpatched >= SAMPLE_RATE * 3 {
             self.patch()?;
+        }
+        if take < pcm.len() {
+            // The header has no room for more; write what fits and stop, rather
+            // than keep appending samples no player will reach.
+            self.patch()?;
+            return Err(std::io::Error::other(
+                "the recording reached the 4 GB limit of a WAV file",
+            ));
         }
         Ok(())
     }
@@ -459,5 +537,104 @@ mod tests {
             u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
             36 + data
         );
+    }
+
+    #[test]
+    fn retries_the_same_audio_once() {
+        let (tx, rx) = channel();
+        let mut alerts = Alerts::default();
+        let mut calls = 0;
+        let mut attempt = || {
+            calls += 1;
+            if calls == 1 {
+                Err(anyhow::anyhow!("the recogniser stopped"))
+            } else {
+                Ok(vec![AsrSeg {
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "hello".into(),
+                }])
+            }
+        };
+        commit_stretch(&mut attempt, &tx, &mut alerts, 1_000, 900, false);
+        drop(tx);
+        assert_eq!(calls, 2);
+        let finals: Vec<_> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                LiveEvent::Final {
+                    start_ms,
+                    end_ms,
+                    text,
+                } => Some((start_ms, end_ms, text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finals, vec![(1_000, 1_500, "hello".to_string())]);
+    }
+
+    #[test]
+    fn a_stretch_that_fails_twice_leaves_a_marked_cue() {
+        let (tx, rx) = channel();
+        let mut alerts = Alerts::default();
+        let mut calls = 0;
+        let mut attempt = || {
+            calls += 1;
+            Err::<Vec<AsrSeg>, _>(anyhow::anyhow!("the recogniser stopped"))
+        };
+        commit_stretch(&mut attempt, &tx, &mut alerts, 1_000, 900, false);
+        drop(tx);
+        assert_eq!(calls, 2);
+        let events: Vec<LiveEvent> = rx.try_iter().collect();
+        assert!(
+            matches!(&events[0], LiveEvent::Final { start_ms: 1_000, end_ms: 1_900, text } if text.as_str() == MISSED_CUE),
+            "the stretch is marked in the cue list"
+        );
+        assert!(
+            matches!(&events[1], LiveEvent::Error(m) if m.contains("the recogniser stopped")),
+            "the failure is shown"
+        );
+    }
+
+    #[test]
+    fn a_changed_error_reaches_the_ui() {
+        let mut alerts = Alerts::default();
+        assert_eq!(
+            alerts.report(&anyhow::anyhow!("boom")).as_deref(),
+            Some("boom")
+        );
+        assert_eq!(alerts.report(&anyhow::anyhow!("boom")), None);
+        assert_eq!(
+            alerts.report(&anyhow::anyhow!("bang")).as_deref(),
+            Some("bang")
+        );
+        // After a good stretch, the same words are news again.
+        alerts.recovered();
+        assert_eq!(
+            alerts.report(&anyhow::anyhow!("bang")).as_deref(),
+            Some("bang")
+        );
+    }
+
+    #[test]
+    fn recording_stops_at_the_wav_limit() {
+        let path = std::env::temp_dir().join(format!("taurus-limit-{}.wav", std::process::id()));
+        let mut r = Recording::create(&path).unwrap();
+        // Four samples short of the largest length a RIFF header can describe.
+        r.samples = MAX_SAMPLES - 4;
+        let err = r.push(&[0.5; 16]).unwrap_err();
+        assert!(err.to_string().contains("4 GB"), "{err}");
+        assert_eq!(r.samples, MAX_SAMPLES);
+        // Nothing more goes in once the header is full.
+        assert!(r.push(&[0.5; 16]).is_err());
+        assert_eq!(r.samples, MAX_SAMPLES);
+        drop(r);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes.len(), 44 + 4 * 2, "only the four samples that fit");
+        let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(data as u64, MAX_SAMPLES * 2);
+        assert_eq!(riff as u64, 36 + data as u64);
     }
 }
