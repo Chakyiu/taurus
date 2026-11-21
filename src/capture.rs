@@ -165,6 +165,64 @@ impl Drop for ScreenRecording {
     }
 }
 
+/// A rectangle on the screen in points, the unit ScreenCaptureKit reports both
+/// displays and windows in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Rect {
+    fn new(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    /// How much of `other` lies inside this rectangle.
+    fn overlap(&self, other: &Rect) -> f64 {
+        let w = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
+        let h = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
+        if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+    }
+}
+
+/// The display holding most of `windows`, by covered area. A chosen app can be
+/// on a second monitor, so the recording has to follow its windows there. Falls
+/// back to the first display when no window is on any of them, since a display
+/// still has to be picked.
+fn display_for_windows(windows: &[Rect], displays: &[Rect]) -> Option<usize> {
+    if displays.is_empty() {
+        return None;
+    }
+    let mut best = 0;
+    let mut best_area = 0.0;
+    for (i, d) in displays.iter().enumerate() {
+        let area: f64 = windows.iter().map(|w| d.overlap(w)).sum();
+        if area > best_area {
+            best = i;
+            best_area = area;
+        }
+    }
+    Some(best)
+}
+
+/// The movie's pixel size for a display of `points` at `scale` pixels per point.
+/// Full quality keeps the display's own pixels up to 4K across; the other
+/// qualities cap the height. Both sides are rounded down to even numbers.
+fn movie_size(points: (u32, u32), scale: f64, quality: VideoQuality) -> (u32, u32) {
+    let scale = scale.max(1.0);
+    let w = points.0.max(1) as f64 * scale;
+    let h = points.1.max(1) as f64 * scale;
+    let shrink = match quality.max_height() {
+        Some(max) => (max as f64 / h).min(1.0),
+        None => (3840.0 / w).min(1.0),
+    };
+    let even = |v: f64| ((v.round() as u32) / 2 * 2).max(2);
+    (even(w * shrink), even(h * shrink))
+}
+
 /// Records `target` (`WHOLE_SCREEN` or an app name) to an H.264 movie at
 /// `path`, with this Mac's sound and, when asked, the default microphone.
 pub fn record_screen(
@@ -185,18 +243,14 @@ pub fn record_screen(
     let content = SCShareableContent::get().map_err(|e| {
         anyhow!("Taurus needs the Screen Recording permission to record the screen ({e})")
     })?;
-    let display = content
-        .displays()
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no display to record"))?;
-    let filter = if target == WHOLE_SCREEN {
-        SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build()
+    let displays = content.displays();
+    if displays.is_empty() {
+        bail!("no display to record");
+    }
+    let apps = content.applications();
+    let picked: Vec<&SCRunningApplication> = if target == WHOLE_SCREEN {
+        Vec::new()
     } else {
-        let apps = content.applications();
         let picked: Vec<&SCRunningApplication> = apps
             .iter()
             .filter(|a| a.application_name() == target)
@@ -204,26 +258,65 @@ pub fn record_screen(
         if picked.is_empty() {
             bail!("{target} is not running, so it cannot be recorded");
         }
+        picked
+    };
+    // Follow the chosen app onto whichever display its windows are on.
+    let chosen = if picked.is_empty() {
+        0
+    } else {
+        let windows: Vec<Rect> = content
+            .windows()
+            .iter()
+            .filter(|w| w.window_layer() == 0 && w.frame().size.width > 1.0)
+            .filter(|w| {
+                w.owning_application()
+                    .is_some_and(|a| picked.iter().any(|p| p.process_id() == a.process_id()))
+            })
+            .map(|w| {
+                let f = w.frame();
+                Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height)
+            })
+            .collect();
+        let display_rects: Vec<Rect> = displays
+            .iter()
+            .map(|d| {
+                let f = d.frame();
+                Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height)
+            })
+            .collect();
+        display_for_windows(&windows, &display_rects).unwrap_or(0)
+    };
+    let display = &displays[chosen];
+    let filter = if picked.is_empty() {
         SCContentFilter::create()
-            .with_display(&display)
+            .with_display(display)
+            .with_excluding_windows(&[])
+            .build()
+    } else {
+        SCContentFilter::create()
+            .with_display(display)
             .with_including_applications(&picked, &[])
             .build()
     }
     .map_err(|e| anyhow!("could not set up the screen recording: {e}"))?;
 
-    // Retina displays report points; full quality records every pixel, within 4K.
-    let (w, h) = (
-        display.width().max(1) as f64 * 2.0,
-        display.height().max(1) as f64 * 2.0,
+    // ScreenCaptureKit reports the display in points; the movie wants pixels,
+    // so use this display's own point-to-pixel scale instead of assuming Retina.
+    let (points, scale) = (
+        (display.width(), display.height()),
+        f64::from(filter.point_pixel_scale()),
     );
-    let scale = match quality.max_height() {
-        Some(max) => (max as f64 / h).min(1.0),
-        None => (3840.0 / w).min(1.0),
-    };
-    let even = |v: f64| ((v.round() as u32) / 2 * 2).max(2);
+    let (w, h) = movie_size(points, scale, quality);
+    eprintln!(
+        "taurus: recording display {} ({}x{} points at {}x) as {w}x{h}",
+        display.display_id(),
+        points.0,
+        points.1,
+        scale
+    );
     let config = SCStreamConfiguration::new()
-        .with_width(even(w * scale))
-        .with_height(even(h * scale))
+        .with_width(w)
+        .with_height(h)
         .with_scales_to_fit(true)
         .with_minimum_frame_interval(&CMTime::new(1, quality.fps()))
         .with_shows_cursor(true)
@@ -583,5 +676,82 @@ mod tests {
             total += out.len();
         }
         assert!((total as i64 - 16_000).abs() < 4, "{total}");
+    }
+
+    fn display(w: f64, h: f64) -> Rect {
+        Rect::new(0.0, 0.0, w, h)
+    }
+
+    #[test]
+    fn a_one_x_display_is_asked_for_its_own_pixels() {
+        assert_eq!(
+            movie_size((1920, 1080), 1.0, VideoQuality::Full),
+            (1920, 1080)
+        );
+        assert_eq!(
+            movie_size((1920, 1080), 1.0, VideoQuality::Standard),
+            (1920, 1080)
+        );
+        assert_eq!(
+            movie_size((1920, 1080), 1.0, VideoQuality::Small),
+            (1280, 720)
+        );
+    }
+
+    #[test]
+    fn a_retina_display_keeps_every_pixel() {
+        assert_eq!(
+            movie_size((1512, 982), 2.0, VideoQuality::Full),
+            (3024, 1964)
+        );
+        assert_eq!(
+            movie_size((1512, 982), 2.0, VideoQuality::Standard),
+            (1662, 1080)
+        );
+        assert_eq!(
+            movie_size((1512, 982), 2.0, VideoQuality::Small),
+            (1108, 720)
+        );
+    }
+
+    #[test]
+    fn a_movie_is_capped_at_4k_across() {
+        assert_eq!(
+            movie_size((5120, 1440), 1.0, VideoQuality::Full),
+            (3840, 1080)
+        );
+    }
+
+    #[test]
+    fn an_unreported_scale_is_taken_as_one() {
+        assert_eq!(
+            movie_size((1920, 1080), 0.0, VideoQuality::Full),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn the_display_showing_the_windows_wins() {
+        let displays = [
+            display(1920.0, 1080.0),
+            Rect::new(1920.0, 0.0, 1512.0, 982.0),
+        ];
+        // A window mostly on the second monitor.
+        let windows = [Rect::new(2400.0, 100.0, 900.0, 700.0)];
+        assert_eq!(display_for_windows(&windows, &displays), Some(1));
+        // The monitor holding the larger share of a window that spans both.
+        let windows = [Rect::new(1500.0, 100.0, 1000.0, 700.0)];
+        assert_eq!(display_for_windows(&windows, &displays), Some(1));
+        let windows = [Rect::new(1000.0, 100.0, 1000.0, 700.0)];
+        assert_eq!(display_for_windows(&windows, &displays), Some(0));
+    }
+
+    #[test]
+    fn no_windows_or_no_displays_falls_back_to_the_first_one() {
+        let displays = [display(1920.0, 1080.0), display(1920.0, 1080.0)];
+        assert_eq!(display_for_windows(&[], &displays), Some(0));
+        let offscreen = [Rect::new(9000.0, 9000.0, 400.0, 400.0)];
+        assert_eq!(display_for_windows(&offscreen, &displays), Some(0));
+        assert_eq!(display_for_windows(&offscreen, &[]), None);
     }
 }
