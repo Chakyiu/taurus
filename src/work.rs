@@ -21,6 +21,14 @@ use crate::store;
 use crate::subs::{self, is_cjk};
 use crate::update::{self, Release};
 
+pub struct PlaybackData {
+    pcm: Vec<f32>,
+    window_start_ms: i64,
+    duration_ms: i64,
+    path: PathBuf,
+    kind: Kind,
+}
+
 pub enum Bg {
     Lines {
         pid: String,
@@ -87,7 +95,7 @@ pub enum Bg {
     MtTest(Result<String, String>),
     Playback {
         pid: String,
-        result: Result<Vec<f32>, String>,
+        result: Result<PlaybackData, String>,
     },
     SpeakerProgress {
         pid: String,
@@ -2044,12 +2052,36 @@ impl Workbench {
         self.player = None;
         self.player_loading = Some((pid.clone(), ms.unwrap_or(0)));
         let tx = self.bg_tx.clone();
+        let requested_ms = ms.unwrap_or(0);
         spawn("playback", move || {
-            let result = match kind {
-                Kind::Audio => crate::player::read_recording(&path),
-                _ => media::decode_audio(&path, None, |_| {}, || false),
-            }
-            .map_err(|e| format!("{e:#}"));
+            let result = (|| {
+                let duration_ms = match kind {
+                    Kind::Audio => crate::player::recording_duration_ms(&path)?,
+                    _ => media::probe(&path)?.duration_ms,
+                };
+                let window_start_ms = (requested_ms.max(0) - 5_000).max(0).min(duration_ms);
+                let window_len_ms = (duration_ms - window_start_ms).min(60_000);
+                let pcm = match kind {
+                    Kind::Audio => {
+                        crate::player::read_recording_window(&path, window_start_ms, window_len_ms)
+                    }
+                    _ => media::decode_audio_window(
+                        &path,
+                        None,
+                        window_start_ms,
+                        window_len_ms,
+                        || false,
+                    ),
+                }?;
+                Ok(PlaybackData {
+                    pcm,
+                    window_start_ms,
+                    duration_ms,
+                    path,
+                    kind,
+                })
+            })()
+            .map_err(|e: anyhow::Error| format!("{e:#}"));
             let _ = tx.send(Bg::Playback { pid, result });
         });
         self.sync_video(cx);
@@ -2059,7 +2091,7 @@ impl Workbench {
     fn playback_loaded(
         &mut self,
         pid: String,
-        result: Result<Vec<f32>, String>,
+        result: Result<PlaybackData, String>,
         cx: &mut Context<Self>,
     ) {
         let Some((id, start)) = self.player_loading.take() else {
@@ -2069,7 +2101,23 @@ impl Workbench {
             self.player_loading = Some((id, start));
             return;
         }
-        match result.and_then(|pcm| crate::player::Player::new(pcm).map_err(|e| format!("{e:#}"))) {
+        let result = result.and_then(|data| {
+            let path = data.path.clone();
+            let kind = data.kind;
+            crate::player::Player::new_windowed(
+                data.pcm,
+                data.window_start_ms,
+                data.duration_ms,
+                move |start, duration, cancel| match kind {
+                    Kind::Audio => crate::player::read_recording_window(&path, start, duration),
+                    _ => media::decode_audio_window(&path, None, start, duration, || {
+                        cancel.load(Ordering::Relaxed)
+                    }),
+                },
+            )
+            .map_err(|e| format!("{e:#}"))
+        });
+        match result {
             Ok(pl) => {
                 pl.seek(start);
                 pl.set_playing(true);
@@ -2415,18 +2463,24 @@ impl Workbench {
         let tx = self.bg_tx.clone();
         spawn("speakers", move || {
             let result = (|| {
-                let pcm = match kind {
-                    Kind::Audio => crate::player::read_recording(&path),
-                    _ => {
-                        media::decode_audio(&path, None, |_| {}, || cancel.load(Ordering::Relaxed))
-                    }
-                }?;
+                let duration_ms = match kind {
+                    Kind::Audio => crate::player::recording_duration_ms(&path)?,
+                    _ => media::probe(&path)?.duration_ms,
+                };
                 let model = speaker::SpeakerModel::load()?;
                 let mut last = 0;
-                speaker::identify(
+                speaker::identify_from(
                     &model,
-                    &pcm,
+                    duration_ms,
                     &spans,
+                    |start, end| match kind {
+                        Kind::Audio => {
+                            crate::player::read_recording_window(&path, start, end - start)
+                        }
+                        _ => media::decode_audio_window(&path, None, start, end - start, || {
+                            cancel.load(Ordering::Relaxed)
+                        }),
+                    },
                     |done| {
                         if done - last >= 8 || done == spans.len() {
                             last = done;

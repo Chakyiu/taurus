@@ -155,6 +155,81 @@ pub fn extract_subtitle(path: &Path, stream: usize) -> Result<Vec<crate::data::S
     subs::parse("track.srt", &String::from_utf8_lossy(&out.stdout))
 }
 
+/// Decodes a bounded section of one audio stream to 16 kHz mono floats.
+pub fn decode_audio_window(
+    path: &Path,
+    stream: Option<usize>,
+    start_ms: i64,
+    duration_ms: i64,
+    cancelled: impl Fn() -> bool,
+) -> Result<Vec<f32>> {
+    let start_ms = start_ms.max(0);
+    let map = stream
+        .map(|s| format!("0:{s}"))
+        .unwrap_or_else(|| "0:a:0".into());
+    let mut child = Command::new(need("ffmpeg")?)
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-ss",
+            &format!("{}.{:03}", start_ms / 1000, start_ms % 1000),
+            "-t",
+            &format!(
+                "{}.{:03}",
+                duration_ms.max(0) / 1000,
+                duration_ms.max(0) % 1000
+            ),
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-map",
+            &map,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            &SAMPLE_RATE.to_string(),
+            "-f",
+            "f32le",
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg")?;
+    let mut stdout = child.stdout.take().context("ffmpeg output")?;
+    let mut bytes = Vec::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        if cancelled() {
+            let _ = child.kill();
+            bail!("cancelled");
+        }
+        let n = stdout.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        let mut err = Vec::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut err);
+        }
+        bail!(
+            "{}",
+            first_line(&err).unwrap_or("ffmpeg could not decode the audio".into())
+        );
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
 /// Decodes one audio stream to 16 kHz mono float samples, reporting how many
 /// milliseconds have been decoded so far.
 pub fn decode_audio(
