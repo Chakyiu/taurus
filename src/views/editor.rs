@@ -447,7 +447,7 @@ impl Workbench {
         let Some(p) = self.current() else {
             return div();
         };
-        let stats = project_stats(&self.glossary, p);
+        let stats = self.cached_project_stats(p);
         let only = self.editor.review_only;
         let count = match stats.count {
             1 => "1 line".to_string(),

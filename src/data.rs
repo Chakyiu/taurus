@@ -943,6 +943,132 @@ pub fn longest_line(text: &str) -> usize {
     text.split('\n').map(char_len).max().unwrap_or(0)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CachedTerm {
+    id: String,
+    term: String,
+    target: String,
+    rule: Rule,
+    scope: Scope,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LineInputs {
+    in_ms: i64,
+    out_ms: i64,
+    orig: String,
+    trans: String,
+    has_fix: bool,
+    next_in_ms: Option<i64>,
+}
+
+impl LineInputs {
+    fn matches(&self, p: &Project, i: usize) -> bool {
+        let segment = &p.segs[i];
+        self.in_ms == segment.in_ms
+            && self.out_ms == segment.out_ms
+            && self.orig == segment.orig
+            && self.trans == segment.trans
+            && self.has_fix == segment.fix.is_some()
+            && self.next_in_ms == p.segs.get(i + 1).map(|next| next.in_ms)
+    }
+
+    fn new(p: &Project, i: usize) -> Self {
+        let segment = &p.segs[i];
+        Self {
+            in_ms: segment.in_ms,
+            out_ms: segment.out_ms,
+            orig: segment.orig.clone(),
+            trans: segment.trans.clone(),
+            has_fix: segment.fix.is_some(),
+            next_in_ms: p.segs.get(i + 1).map(|next| next.in_ms),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FlagCache {
+    project_id: String,
+    translate: bool,
+    glossary: Vec<CachedTerm>,
+    entries: Vec<Option<(LineInputs, Vec<Flag>)>>,
+}
+
+/// Reuses each line's checks until one of their actual inputs changes.
+/// Returns the number of lines whose flags were recomputed for trace tests.
+pub fn cached_flags(
+    glossary: &[Term],
+    p: &Project,
+    cache: &mut FlagCache,
+) -> (Vec<Vec<Flag>>, usize) {
+    let recomputed = refresh_flag_cache(glossary, p, cache);
+    let rows = cache
+        .entries
+        .iter()
+        .filter_map(|entry| entry.as_ref().map(|(_, flags)| flags.clone()))
+        .collect();
+    (rows, recomputed)
+}
+
+pub fn cached_flagged_count(
+    glossary: &[Term],
+    p: &Project,
+    cache: &mut FlagCache,
+) -> (usize, usize) {
+    let recomputed = refresh_flag_cache(glossary, p, cache);
+    let flagged = cache
+        .entries
+        .iter()
+        .filter_map(|entry| entry.as_ref().map(|(_, flags)| flags))
+        .filter(|flags| to_check(flags))
+        .count();
+    (flagged, recomputed)
+}
+
+fn refresh_flag_cache(glossary: &[Term], p: &Project, cache: &mut FlagCache) -> usize {
+    let glossary_changed = cache.glossary.len() != glossary.len()
+        || cache
+            .glossary
+            .iter()
+            .zip(glossary)
+            .any(|(cached, current)| {
+                cached.id != current.id
+                    || cached.term != current.term
+                    || cached.target != current.target
+                    || cached.rule != current.rule
+                    || cached.scope != current.scope
+            });
+    if cache.project_id != p.id || cache.translate != p.translate || glossary_changed {
+        cache.project_id.clone_from(&p.id);
+        cache.translate = p.translate;
+        cache.glossary = glossary
+            .iter()
+            .map(|term| CachedTerm {
+                id: term.id.clone(),
+                term: term.term.clone(),
+                target: term.target.clone(),
+                rule: term.rule,
+                scope: term.scope.clone(),
+            })
+            .collect();
+        cache.entries.clear();
+    }
+
+    let mut recomputed = 0;
+    cache.entries.resize_with(p.segs.len(), || None);
+    for i in 0..p.segs.len() {
+        let entry = &mut cache.entries[i];
+        if entry
+            .as_ref()
+            .is_none_or(|(inputs, _)| !inputs.matches(p, i))
+        {
+            *entry = Some((LineInputs::new(p, i), flags_for(glossary, p, i)));
+            recomputed += 1;
+        }
+    }
+    recomputed
+}
+
 pub fn flags_for(glossary: &[Term], p: &Project, i: usize) -> Vec<Flag> {
     let segs = &p.segs;
     let project_id = Some(p.id.as_str());
@@ -1489,6 +1615,39 @@ fn ass_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_flags_skip_clean_paints_and_refresh_only_changed_line() {
+        let mut project = Project::new(
+            "cache-test".into(),
+            Kind::Subtitle,
+            "test".into(),
+            "test.srt".into(),
+            None,
+            Status::Review,
+            "en",
+            "zh",
+            vec![
+                Segment::new(0, 1000, "A short line", "短句"),
+                Segment::new(1200, 2200, "Another short line", "另一句"),
+            ],
+        );
+        project.translate = false;
+        let glossary = Vec::new();
+        let mut cache = FlagCache::default();
+
+        assert_eq!(cached_flags(&glossary, &project, &mut cache).1, 2);
+        assert_eq!(cached_flags(&glossary, &project, &mut cache).1, 0);
+        project.segs[1].orig = "A changed line".into();
+        assert_eq!(cached_flags(&glossary, &project, &mut cache).1, 1);
+        assert_eq!(cached_flags(&glossary, &project, &mut cache).1, 0);
+        project.segs[1].in_ms += 100;
+        assert_eq!(
+            cached_flags(&glossary, &project, &mut cache).1,
+            2,
+            "editing a cue start refreshes its gap-dependent neighbor"
+        );
+    }
 
     #[test]
     fn transcript_skips_blanks_and_names_speakers() {

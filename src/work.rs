@@ -45,6 +45,18 @@ pub enum Bg {
         job: u64,
         result: Result<Probe, String>,
     },
+    Imported {
+        name: String,
+        path: PathBuf,
+        to: String,
+        translate: bool,
+        result: Result<Vec<Segment>, String>,
+    },
+    Devices {
+        request: u64,
+        sel: Sel,
+        choices: Vec<String>,
+    },
     Stage {
         job: u64,
         stage: usize,
@@ -175,6 +187,10 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+fn serialize_if_dirty<T>(dirty: bool, serialize: impl FnOnce() -> T) -> Option<T> {
+    dirty.then(serialize)
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -217,6 +233,22 @@ impl Workbench {
             Bg::MtFailed { pid, job, error } => self.mt_failed(&pid, job, error, cx),
             Bg::LiveLine { pid, seg, result } => self.live_translated(&pid, seg, result, cx),
             Bg::Playback { pid, result } => self.playback_loaded(pid, result, cx),
+            Bg::Imported {
+                name,
+                path,
+                to,
+                translate,
+                result,
+            } => {
+                self.import_ready(name, path, to, translate, result, cx);
+            }
+            Bg::Devices {
+                request,
+                sel,
+                choices,
+            } => {
+                self.apply_device_refresh(request, sel, choices);
+            }
             Bg::Probed { job, result } => {
                 self.probed(job, result);
                 if cfg!(debug_assertions) {
@@ -363,13 +395,12 @@ impl Workbench {
     }
 
     fn autosave(&mut self, cx: &mut Context<Self>) {
-        let json = self.library_json();
-        if json == self.saved_json {
+        let Some(json) = serialize_if_dirty(self.library_dirty, || self.library_json()) else {
             return;
-        }
+        };
         match store::write_library(&json) {
             Ok(()) => {
-                self.saved_json = json;
+                self.library_dirty = false;
                 self.save_failed = false;
             }
             Err(e) => {
@@ -387,9 +418,12 @@ impl Workbench {
     }
 
     pub(crate) fn save_now(&mut self) {
-        let json = self.library_json();
-        if json != self.saved_json && store::write_library(&json).is_ok() {
-            self.saved_json = json;
+        let Some(json) = serialize_if_dirty(self.library_dirty, || self.library_json()) else {
+            return;
+        };
+        if store::write_library(&json).is_ok() {
+            self.library_dirty = false;
+            self.save_failed = false;
         }
     }
 
@@ -669,7 +703,8 @@ impl Workbench {
     // ─── import ────────────────────────────────────────────
 
     pub fn import_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let mut made = Vec::new();
+        let to = self.extract.to.clone();
+        let translate = self.settings.translate;
         for path in paths {
             let name = path
                 .file_name()
@@ -686,98 +721,129 @@ impl Workbench {
                 );
                 continue;
             }
-            let segs = std::fs::read(&path)
-                .map_err(anyhow::Error::from)
-                .and_then(|b| subs::parse(&name, &decode_text(&b)));
-            let segs = match segs {
-                Ok(s) if !s.is_empty() => s,
-                Ok(_) => {
-                    self.toast(
-                        format!("{name} has no cues in it."),
-                        ToastKind::Warn,
-                        None,
-                        cx,
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    self.toast(
-                        format!("Could not read {name}: {e:#}."),
-                        ToastKind::Bad,
-                        None,
-                        cx,
-                    );
-                    continue;
-                }
-            };
-            let from = subs::guess_lang(&name, &segs);
-            let to = if self.extract.to != from {
-                self.extract.to.clone()
-            } else if from == "en" {
-                "zh".into()
-            } else {
-                "en".into()
-            };
-            let id = self.fresh_id("p");
-            let p = Project::new(
-                id.clone(),
-                Kind::Subtitle,
-                title_from_file(&name),
-                name.clone(),
-                Some(path.to_string_lossy().to_string()),
-                Status::Working,
-                &from,
-                &to,
-                segs,
-            );
-            let mut p = p;
-            p.translate = self.settings.translate;
-            self.projects.insert(0, p);
-            made.push(id);
-        }
-        let Some(last) = made.last().cloned() else {
-            return;
-        };
-        self.project_id = Some(last.clone());
-        let ready = self.settings.mt_ready();
-        for id in &made {
-            let translate = self.project(id).is_some_and(|p| p.translate);
-            if translate && ready {
-                self.translate_project(id, None, cx);
-            } else if let Some(p) = self.project_mut(id) {
-                p.status = Status::Review;
+            let tx = self.bg_tx.clone();
+            let worker_name = name.clone();
+            let worker_path = path.clone();
+            let worker_to = to.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("taurus-subtitle-import".into())
+                .spawn(move || {
+                    let result = std::fs::read(&worker_path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|bytes| subs::parse(&worker_name, &decode_text(&bytes)))
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = tx.send(Bg::Imported {
+                        name: worker_name,
+                        path: worker_path,
+                        to: worker_to,
+                        translate,
+                        result,
+                    });
+                })
+            {
+                self.toast(
+                    format!("Could not start importing {name}: {error}."),
+                    ToastKind::Bad,
+                    None,
+                    cx,
+                );
             }
+        }
+    }
+
+    fn import_ready(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        to_choice: String,
+        translate: bool,
+        result: Result<Vec<Segment>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let segs = match result {
+            Ok(segs) if !segs.is_empty() => segs,
+            Ok(_) => {
+                self.toast(
+                    format!("{name} has no cues in it."),
+                    ToastKind::Warn,
+                    None,
+                    cx,
+                );
+                return;
+            }
+            Err(error) => {
+                self.toast(
+                    format!("Could not read {name}: {error}."),
+                    ToastKind::Bad,
+                    None,
+                    cx,
+                );
+                return;
+            }
+        };
+        let from = subs::guess_lang(&name, &segs);
+        let to = if to_choice != from {
+            to_choice
+        } else if from == "en" {
+            "zh".into()
+        } else {
+            "en".into()
+        };
+        let id = self.fresh_id("p");
+        let mut project = Project::new(
+            id.clone(),
+            Kind::Subtitle,
+            title_from_file(&name),
+            name,
+            Some(path.to_string_lossy().to_string()),
+            Status::Working,
+            &from,
+            &to,
+            segs,
+        );
+        project.translate = translate;
+        self.projects.insert(0, project);
+        self.library_dirty = true;
+        self.project_id = Some(id.clone());
+        let ready = self.settings.mt_ready();
+        if translate && ready {
+            self.translate_project(&id, None, cx);
+        } else if let Some(project) = self.project_mut(&id) {
+            project.status = Status::Review;
         }
         self.settle_all();
         self.save_now();
-        let p = self.project(&last).expect("just imported");
-        let what = if made.len() == 1 {
-            if p.translate {
-                format!(
-                    "“{}” · {} cues, {} → {}",
-                    p.name,
-                    p.segs.len(),
-                    p.from,
-                    p.to
-                )
-            } else {
-                format!("“{}” · {} cues", p.name, p.segs.len())
-            }
+        let project = self.project(&id).expect("imported project");
+        let details = if project.translate {
+            format!(
+                "“{}” · {} cues, {} → {}",
+                project.name,
+                project.segs.len(),
+                project.from,
+                project.to
+            )
         } else {
-            format!("{} files", made.len())
+            format!("“{}” · {} cues", project.name, project.segs.len())
         };
-        if ready {
+        if translate && ready {
             self.toast(
-                format!("Imported {what}. Translating now."),
+                format!("Imported {details}. Translating now."),
                 ToastKind::Ok,
-                Some(("Open", ToastAction::Open(last))),
+                Some(("Open", ToastAction::Open(id))),
+                cx,
+            );
+        } else if translate {
+            self.toast(
+                format!("Imported {details}. Set up translation to fill in the other language."),
+                ToastKind::Warn,
+                Some(("Set up engines", ToastAction::Engines)),
                 cx,
             );
         } else {
             self.toast(
-                format!("Imported {what}. Set up translation to fill in the other language."),
-                ToastKind::Warn,
-                Some(("Set up engines", ToastAction::Engines)),
+                format!("Imported {details}."),
+                ToastKind::Ok,
+                Some(("Open", ToastAction::Open(id))),
                 cx,
             );
         }
@@ -986,6 +1052,7 @@ impl Workbench {
         let mut p = p;
         p.translate = translate;
         self.projects.insert(0, p);
+        self.library_dirty = true;
         self.extract.project_id = Some(id.clone());
         self.project_id = Some(id);
         self.reset_editor_view();
@@ -1105,6 +1172,17 @@ impl Workbench {
             .map(|f| f.name.clone())
             .unwrap_or_default();
         let n = segs.len();
+        if let Some(TrackKey::Sub(stream)) = self.extract.track {
+            if let Some(track) = self
+                .extract
+                .probe
+                .as_mut()
+                .and_then(|probe| probe.subs.iter_mut().find(|track| track.stream == stream))
+            {
+                track.cues = Some(n);
+                track.span_ms = segs.last().map(|segment| segment.out_ms);
+            }
+        }
         let Some(p) = self.project_mut(&id) else {
             return;
         };
@@ -1590,6 +1668,7 @@ impl Workbench {
         let mut p = p;
         p.translate = self.settings.translate;
         self.projects.insert(0, p);
+        self.library_dirty = true;
         self.live.project_id = Some(id.clone());
         let note = if movies_fallback {
             format!(
@@ -3506,6 +3585,30 @@ pub fn mark_terms(text: &str, terms: &[String], cjk: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autosave_serializes_only_after_a_library_change() {
+        let mut serializations = 0;
+        assert_eq!(
+            serialize_if_dirty(false, || {
+                serializations += 1;
+                "library"
+            }),
+            None
+        );
+        assert_eq!(
+            serializations, 0,
+            "clean 1.5 s save tick serialized library"
+        );
+        assert_eq!(
+            serialize_if_dirty(true, || {
+                serializations += 1;
+                "library"
+            }),
+            Some("library")
+        );
+        assert_eq!(serializations, 1, "dirty save must serialize exactly once");
+    }
 
     #[test]
     fn marks_whole_words_and_cjk_runs() {

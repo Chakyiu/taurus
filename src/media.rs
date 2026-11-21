@@ -119,12 +119,8 @@ pub fn probe(path: &Path) -> Result<Probe> {
             _ => {}
         }
     }
-    for t in probe.subs.iter_mut().filter(|t| t.text) {
-        if let Ok(segs) = extract_subtitle(path, t.stream) {
-            t.cues = Some(segs.len());
-            t.span_ms = segs.last().map(|s| s.out_ms);
-        }
-    }
+    // Subtitle payloads are read only after the user picks a track. Extracting
+    // every text track here made the probe duplicate the chosen-track work.
     Ok(probe)
 }
 

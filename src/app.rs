@@ -2,7 +2,7 @@
 //! and the per-screen modules under `views/`; background work (translation,
 //! extraction, live captioning, model downloads, saving) lives in `work.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -181,14 +181,14 @@ impl ExtractState {
                 let cues = s
                     .cues
                     .map(|n| format!("{n} cues"))
-                    .unwrap_or_else(|| "unreadable".into());
+                    .unwrap_or_else(|| "select to scan".into());
                 let span = s
                     .span_ms
                     .map(|ms| format!(" · {}", &srt_time(ms)[..8]))
                     .unwrap_or_default();
                 format!("{} · {cues}{span}", s.codec)
             };
-            let usable = s.text && s.cues.is_some_and(|n| n > 0);
+            let usable = s.text;
             out.push(TrackRow {
                 key: usable.then_some(TrackKey::Sub(s.stream)),
                 title,
@@ -537,9 +537,11 @@ pub struct Workbench {
     pub app_bundle: Option<PathBuf>,
     pub(crate) bg_tx: Sender<Bg>,
     pub(crate) bg_rx: Receiver<Bg>,
-    pub(crate) saved_json: String,
+    pub(crate) library_dirty: bool,
     pub(crate) last_save: Instant,
     pub(crate) save_failed: bool,
+    pub(crate) flag_cache: RefCell<FlagCache>,
+    pub(crate) device_refresh: u64,
     _pump: Option<Task<()>>,
 
     pub pj_search: Entity<InputState>,
@@ -726,7 +728,9 @@ impl Workbench {
         let glossary = lib.glossary;
         let mut projects = lib.projects;
         let mut resume = Vec::new();
+        let mut library_dirty = false;
         for p in projects.iter_mut() {
+            let original_status = p.status;
             // A capture cannot outlive the app; whatever it recorded is kept.
             if p.status == Status::Live {
                 p.status = Status::Review;
@@ -740,11 +744,8 @@ impl Workbench {
                 resume.push(p.id.clone());
             }
             settle_status(&glossary, p);
+            library_dirty |= p.status != original_status;
         }
-        let saved_json = store::library_json(&store::LibraryRef {
-            projects: &projects,
-            glossary: &glossary,
-        });
         let (bg_tx, bg_rx) = channel();
         let project_id = projects
             .iter()
@@ -842,9 +843,11 @@ impl Workbench {
             app_bundle: cx.app_path().ok().and_then(|p| crate::update::bundle(&p)),
             bg_tx,
             bg_rx,
-            saved_json,
+            library_dirty,
             last_save: Instant::now(),
             save_failed: false,
+            flag_cache: RefCell::new(FlagCache::default()),
+            device_refresh: 0,
             _pump: None,
             pj_search,
             gl_search,
@@ -955,6 +958,7 @@ impl Workbench {
     }
 
     pub(crate) fn project_mut(&mut self, id: &str) -> Option<&mut Project> {
+        self.library_dirty = true;
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
@@ -1000,12 +1004,16 @@ impl Workbench {
     pub(crate) fn settle_all(&mut self) {
         let g = &self.glossary;
         let jobs = &self.jobs;
+        let mut changed = false;
         for p in self.projects.iter_mut() {
             if p.status == Status::Working && jobs.contains_key(&p.id) {
                 continue;
             }
+            let before = p.status;
             settle_status(g, p);
+            changed |= p.status != before;
         }
+        self.library_dirty |= changed;
     }
 
     pub(crate) fn fresh_id(&mut self, prefix: &str) -> String {
@@ -1863,25 +1871,50 @@ impl Workbench {
     }
 
     fn refresh_devices(&mut self) {
-        match self.open_select {
-            Some(Sel::VideoDetail) => {
-                self.live.videos = capture::list_video_targets();
-                if !self.live.videos.contains(&self.live.video) {
-                    self.live.videos.push(self.live.video.clone());
-                }
-            }
-            Some(Sel::MicDetail) => {
-                self.live.mics = capture::list_mics();
-                if !self.live.mics.contains(&self.live.mic) {
-                    self.live.mics.push(self.live.mic.clone());
-                }
-            }
-            _ => {
-                self.live.devices = capture::list_apps();
-                if !self.live.devices.contains(&self.live.detail) {
-                    self.live.devices.push(self.live.detail.clone());
-                }
-            }
+        let Some(sel @ (Sel::VideoDetail | Sel::MicDetail | Sel::SourceDetail)) = self.open_select
+        else {
+            return;
+        };
+        self.device_refresh = self.device_refresh.wrapping_add(1);
+        let request = self.device_refresh;
+        let tx = self.bg_tx.clone();
+        let _ = std::thread::Builder::new()
+            .name("taurus-capture-devices".into())
+            .spawn(move || {
+                let choices = match sel {
+                    Sel::VideoDetail => capture::list_video_targets(),
+                    Sel::MicDetail => capture::list_mics(),
+                    _ => capture::list_apps(),
+                };
+                let _ = tx.send(Bg::Devices {
+                    request,
+                    sel,
+                    choices,
+                });
+            });
+    }
+
+    pub(crate) fn apply_device_refresh(
+        &mut self,
+        request: u64,
+        sel: Sel,
+        mut choices: Vec<String>,
+    ) {
+        if request != self.device_refresh || self.open_select != Some(sel) {
+            return;
+        }
+        let selected = match sel {
+            Sel::VideoDetail => &self.live.video,
+            Sel::MicDetail => &self.live.mic,
+            _ => &self.live.detail,
+        };
+        if !choices.contains(selected) {
+            choices.push(selected.clone());
+        }
+        match sel {
+            Sel::VideoDetail => self.live.videos = choices,
+            Sel::MicDetail => self.live.mics = choices,
+            _ => self.live.devices = choices,
         }
     }
 
@@ -1955,7 +1988,9 @@ impl Workbench {
         {
             self.live.draining = None;
         }
+        let old_len = self.projects.len();
         self.projects.retain(|p| p.id != id);
+        self.library_dirty |= self.projects.len() != old_len;
         let mut widened = 0;
         for g in self.glossary.iter_mut() {
             if g.scope == Scope::Project(id.to_string()) {
@@ -1963,6 +1998,7 @@ impl Workbench {
                 widened += 1;
             }
         }
+        self.library_dirty |= widened > 0;
         if self.project_id.as_deref() == Some(id) {
             self.project_id = self.projects.first().map(|p| p.id.clone());
             self.reset_editor_view();
@@ -2101,6 +2137,7 @@ impl Workbench {
             ConfirmAction::DeleteTerm(id) => {
                 if let Some(pos) = self.glossary.iter().position(|g| g.id == id) {
                     let g = self.glossary.remove(pos);
+                    self.library_dirty = true;
                     self.settle_all();
                     self.toast(format!("Deleted “{}”.", g.term), ToastKind::Ok, None, cx);
                 }
@@ -2170,12 +2207,23 @@ impl Workbench {
         let Some(p) = self.current() else {
             return Vec::new();
         };
-        (0..p.segs.len())
-            .filter_map(|i| {
-                let flags = flags_for(&self.glossary, p, i);
+        let (flags, _) = cached_flags(&self.glossary, p, &mut self.flag_cache.borrow_mut());
+        flags
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, flags)| {
                 (!self.editor.review_only || to_check(&flags)).then_some((i, flags))
             })
             .collect()
+    }
+
+    pub(crate) fn cached_project_stats(&self, p: &Project) -> Stats {
+        let (flagged, _) =
+            cached_flagged_count(&self.glossary, p, &mut self.flag_cache.borrow_mut());
+        Stats {
+            count: p.segs.len(),
+            flagged,
+        }
     }
 
     pub fn toggle_review_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2433,6 +2481,7 @@ impl Workbench {
             return;
         };
         let (editing, rule, scope) = (editing.clone(), *rule, scope.clone());
+        self.library_dirty = true;
         let term = self.term_input.read(cx).value().trim().to_string();
         let target = if rule == Rule::Keep {
             String::new()
