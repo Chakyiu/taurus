@@ -4,10 +4,10 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -29,6 +29,170 @@ pub enum CaptureKind {
         app: Option<String>,
         mic: Option<String>,
     },
+}
+
+const MAX_AUDIO_QUEUE_BLOCKS: usize = 1024;
+
+/// Non-blocking sender for the live capture queue. Full or busy queues drop new blocks.
+pub(crate) struct AudioSender(Arc<AudioQueueShared>);
+
+struct AudioQueueShared {
+    state: Mutex<AudioQueueState>,
+    ready: Condvar,
+    max_samples: usize,
+    max_blocks: usize,
+    dropped: AtomicBool,
+}
+
+struct AudioQueueState {
+    blocks: VecDeque<Vec<f32>>,
+    samples: usize,
+    closed: bool,
+}
+
+pub(crate) struct AudioReceiver(Arc<AudioQueueShared>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AudioRecvError {
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioSendStatus {
+    Sent,
+    Dropped,
+    Closed,
+}
+
+trait PcmSink: Send + Sync + 'static {
+    fn send_pcm(&self, pcm: Vec<f32>) -> AudioSendStatus;
+}
+
+impl PcmSink for Sender<Vec<f32>> {
+    fn send_pcm(&self, pcm: Vec<f32>) -> AudioSendStatus {
+        if self.send(pcm).is_ok() {
+            AudioSendStatus::Sent
+        } else {
+            AudioSendStatus::Closed
+        }
+    }
+}
+
+impl PcmSink for AudioSender {
+    fn send_pcm(&self, pcm: Vec<f32>) -> AudioSendStatus {
+        self.try_send(pcm)
+    }
+}
+
+/// A hard cap measured in samples. The capture callback never waits on the consumer.
+pub(crate) fn audio_queue(max_samples: usize) -> (AudioSender, AudioReceiver) {
+    let shared = Arc::new(AudioQueueShared {
+        state: Mutex::new(AudioQueueState {
+            blocks: VecDeque::new(),
+            samples: 0,
+            closed: false,
+        }),
+        ready: Condvar::new(),
+        max_samples,
+        max_blocks: MAX_AUDIO_QUEUE_BLOCKS,
+        dropped: AtomicBool::new(false),
+    });
+    (AudioSender(shared.clone()), AudioReceiver(shared))
+}
+
+impl AudioSender {
+    fn note_dropped(&self) {
+        self.0.dropped.store(true, Ordering::Relaxed);
+    }
+
+    fn try_send(&self, pcm: Vec<f32>) -> AudioSendStatus {
+        if pcm.is_empty() {
+            return AudioSendStatus::Sent;
+        }
+        let mut state = match self.0.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => {
+                self.0.dropped.store(true, Ordering::Relaxed);
+                return AudioSendStatus::Dropped;
+            }
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+        };
+        if state.closed {
+            return AudioSendStatus::Closed;
+        }
+        if state.blocks.len() >= self.0.max_blocks
+            || pcm.len() > self.0.max_samples.saturating_sub(state.samples)
+        {
+            self.0.dropped.store(true, Ordering::Relaxed);
+            return AudioSendStatus::Dropped;
+        }
+        state.samples += pcm.len();
+        state.blocks.push_back(pcm);
+        self.0.ready.notify_one();
+        AudioSendStatus::Sent
+    }
+}
+
+impl Drop for AudioSender {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        self.0.ready.notify_all();
+    }
+}
+
+impl AudioReceiver {
+    pub fn take_dropped(&self) -> bool {
+        self.0.dropped.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn try_recv(&self) -> std::result::Result<Vec<f32>, TryRecvError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(block) = state.blocks.pop_front() {
+            state.samples -= block.len();
+            Ok(block)
+        } else if state.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> std::result::Result<Vec<f32>, AudioRecvError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(block) = state.blocks.pop_front() {
+                state.samples -= block.len();
+                return Ok(block);
+            }
+            if state.closed {
+                return Err(AudioRecvError::Disconnected);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(AudioRecvError::Timeout);
+            }
+            let (next, result) = self
+                .0
+                .ready
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next;
+            if result.timed_out() && state.blocks.is_empty() {
+                return Err(AudioRecvError::Timeout);
+            }
+        }
+    }
+}
+
+impl Drop for AudioReceiver {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        self.0.ready.notify_all();
+    }
 }
 
 /// Stops the capture when dropped.
@@ -358,10 +522,14 @@ pub fn record_screen(
     Ok(ScreenRecording { stream, output })
 }
 
-pub fn start(kind: CaptureKind, sink: Sender<Vec<f32>>) -> Result<Capture> {
+pub(crate) fn start(kind: CaptureKind, sink: AudioSender) -> Result<Capture> {
     if let CaptureKind::Both { app, mic } = kind {
         return start_both(app, mic, sink);
     }
+    start_source(kind, sink)
+}
+
+fn start_source<S: PcmSink>(kind: CaptureKind, sink: S) -> Result<Capture> {
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = channel::<Result<()>>();
     let flag = stop.clone();
@@ -390,11 +558,11 @@ const MAX_LEAD: usize = SAMPLE_RATE / 2;
 /// How much of that lead is kept after filling, so late audio still lines up.
 const KEEP_LEAD: usize = SAMPLE_RATE / 4;
 
-fn start_both(app: Option<String>, mic: Option<String>, sink: Sender<Vec<f32>>) -> Result<Capture> {
-    let (sys_tx, sys_rx) = channel();
-    let system = start(CaptureKind::System(app), sys_tx)?;
-    let (mic_tx, mic_rx) = channel();
-    let microphone = start(CaptureKind::Mic(mic), mic_tx)
+fn start_both(app: Option<String>, mic: Option<String>, sink: AudioSender) -> Result<Capture> {
+    let (sys_tx, sys_rx) = audio_queue(MAX_LEAD);
+    let system = start_source(CaptureKind::System(app), sys_tx)?;
+    let (mic_tx, mic_rx) = audio_queue(MAX_LEAD);
+    let microphone = start_source(CaptureKind::Mic(mic), mic_tx)
         .map_err(|e| anyhow!("the microphone did not start: {e:#}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -403,12 +571,18 @@ fn start_both(app: Option<String>, mic: Option<String>, sink: Sender<Vec<f32>>) 
         .spawn(move || {
             let _sources = (system, microphone);
             let mut mixer = Mixer::default();
+            let mut outward_drop_reported = false;
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(20));
-                let a = drain(&sys_rx);
-                let b = drain(&mic_rx);
+                let a = drain_audio(&sys_rx);
+                let b = drain_audio(&mic_rx);
+                let source_dropped = sys_rx.take_dropped() | mic_rx.take_dropped();
+                if source_dropped && !outward_drop_reported {
+                    sink.note_dropped();
+                    outward_drop_reported = true;
+                }
                 let out = mixer.push(&a, &b);
-                if !out.is_empty() && sink.send(out).is_err() {
+                if !out.is_empty() && sink.send_pcm(out) == AudioSendStatus::Closed {
                     break;
                 }
             }
@@ -416,14 +590,12 @@ fn start_both(app: Option<String>, mic: Option<String>, sink: Sender<Vec<f32>>) 
     Ok(Capture { stop })
 }
 
-fn drain(rx: &Receiver<Vec<f32>>) -> Vec<f32> {
+fn drain_audio(rx: &AudioReceiver) -> Vec<f32> {
     let mut out = Vec::new();
-    loop {
-        match rx.try_recv() {
-            Ok(v) => out.extend(v),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return out,
-        }
+    while let Ok(block) = rx.try_recv() {
+        out.extend(block);
     }
+    out
 }
 
 /// Sums two live streams sample for sample. Whichever arrives first waits for
@@ -452,9 +624,9 @@ impl Mixer {
     }
 }
 
-fn run_mic(
+fn run_mic<S: PcmSink>(
     dev: Option<String>,
-    sink: Sender<Vec<f32>>,
+    sink: S,
     stop: &AtomicBool,
     ready: &Sender<Result<()>>,
 ) -> Result<()> {
@@ -477,7 +649,7 @@ fn run_mic(
         cpal::SampleFormat::F32 => device.build_input_stream(
             config.into(),
             move |data: &[f32], _: &_| {
-                let _ = sink.send(rs.push(data.iter().copied()));
+                let _ = sink.send_pcm(rs.push(data.iter().copied()));
             },
             err,
             None,
@@ -485,7 +657,7 @@ fn run_mic(
         cpal::SampleFormat::I16 => device.build_input_stream(
             config.into(),
             move |data: &[i16], _: &_| {
-                let _ = sink.send(rs.push(data.iter().map(|s| *s as f32 / 32768.0)));
+                let _ = sink.send_pcm(rs.push(data.iter().map(|s| *s as f32 / 32768.0)));
             },
             err,
             None,
@@ -493,7 +665,7 @@ fn run_mic(
         cpal::SampleFormat::I32 => device.build_input_stream(
             config.into(),
             move |data: &[i32], _: &_| {
-                let _ = sink.send(rs.push(data.iter().map(|s| *s as f32 / 2_147_483_648.0)));
+                let _ = sink.send_pcm(rs.push(data.iter().map(|s| *s as f32 / 2_147_483_648.0)));
             },
             err,
             None,
@@ -509,16 +681,16 @@ fn run_mic(
     Ok(())
 }
 
-fn run_system(
+fn run_system<S: PcmSink>(
     app: Option<String>,
-    sink: Sender<Vec<f32>>,
+    sink: S,
     stop: &AtomicBool,
     ready: &Sender<Result<()>>,
 ) -> Result<()> {
     use screencapturekit::prelude::*;
 
-    struct Handler(Sender<Vec<f32>>);
-    impl SCStreamOutputTrait for Handler {
+    struct Handler<S: PcmSink>(S);
+    impl<S: PcmSink> SCStreamOutputTrait for Handler<S> {
         fn did_output_sample_buffer(&self, sample: CMSampleBuffer, kind: SCStreamOutputType) {
             if !matches!(kind, SCStreamOutputType::Audio) {
                 return;
@@ -534,7 +706,7 @@ fn run_system(
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
                 if !pcm.is_empty() {
-                    let _ = self.0.send(pcm);
+                    let _ = self.0.send_pcm(pcm);
                 }
             }
         }
@@ -645,6 +817,27 @@ impl Resampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_audio_queue_drops_new_blocks_at_its_sample_limit() {
+        let (tx, rx) = audio_queue(4);
+        assert_eq!(tx.try_send(vec![0.0; 3]), AudioSendStatus::Sent);
+        assert_eq!(tx.try_send(vec![1.0; 2]), AudioSendStatus::Dropped);
+        assert!(rx.take_dropped());
+        assert!(!rx.take_dropped());
+        assert_eq!(rx.try_recv().unwrap(), vec![0.0; 3]);
+        assert_eq!(tx.try_send(vec![1.0; 4]), AudioSendStatus::Sent);
+        assert_eq!(rx.try_recv().unwrap(), vec![1.0; 4]);
+    }
+
+    #[test]
+    fn busy_audio_queue_drops_instead_of_waiting_on_the_capture_callback() {
+        let (tx, rx) = audio_queue(4);
+        let state = rx.0.state.lock().unwrap();
+        assert_eq!(tx.try_send(vec![0.0]), AudioSendStatus::Dropped);
+        assert!(rx.take_dropped());
+        drop(state);
+    }
 
     #[test]
     fn mixer_lines_up_both_sources() {

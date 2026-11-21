@@ -1,13 +1,14 @@
-//! The live caption pipeline. One worker thread owns the recogniser: audio is
-//! gathered from the first sound, re-read every second or so while someone is
-//! speaking (the provisional line), and committed at the next pause.
+//! The live caption pipeline. Audio capture stays responsive while one
+//! serialized inference worker re-reads provisional lines and commits finals.
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{
+    Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel, sync_channel,
+};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -80,7 +81,7 @@ pub fn start(
     video: Option<VideoPlan>,
 ) -> Result<LiveSession> {
     let recording = Recording::create(record)?;
-    let (audio_tx, audio_rx) = channel::<Vec<f32>>();
+    let (audio_tx, audio_rx) = capture::audio_queue(3 * SAMPLE_RATE);
     let capture = match capture::start(kind, audio_tx) {
         Ok(c) => c,
         Err(e) => {
@@ -125,7 +126,14 @@ pub fn start(
                 }
             };
             let _ = tx.send(LiveEvent::Ready);
-            Worker::new(engine, lang, offset_ms, tx, recording).run(audio_rx, &p, &s);
+            let worker_tx = tx.clone();
+            match Worker::new(engine, lang, offset_ms, tx, recording) {
+                Ok(worker) => worker.run(audio_rx, &p, &s),
+                Err(e) => {
+                    let _ = worker_tx.send(LiveEvent::Error(format!("{e:#}")));
+                    let _ = worker_tx.send(LiveEvent::Stopped);
+                }
+            }
         })?;
     Ok(LiveSession {
         events,
@@ -145,7 +153,16 @@ const MAX_LINE_MS: usize = 9_000;
 pub const MISSED_CUE: &str = "[audio not transcribed]";
 
 struct Worker {
-    engine: Engine,
+    jobs: Option<SyncSender<InferenceJob>>,
+    inference: Option<std::thread::JoinHandle<()>>,
+    final_done: Receiver<()>,
+    pending_finals: usize,
+    partial_every: Duration,
+    generation: Arc<AtomicUsize>,
+    publication: Arc<Mutex<()>>,
+    partial_busy: Arc<AtomicBool>,
+    audio_drop_reported: bool,
+    inference_error_reported: bool,
     lang: String,
     tx: Sender<LiveEvent>,
     /// Samples heard since the capture began, which is the project's clock.
@@ -160,7 +177,6 @@ struct Worker {
     partial_len: usize,
     level_acc: Vec<f32>,
     recent: std::collections::VecDeque<f32>,
-    alerts: Alerts,
     recording: Option<Recording>,
 }
 
@@ -171,9 +187,41 @@ impl Worker {
         offset_ms: i64,
         tx: Sender<LiveEvent>,
         recording: Recording,
-    ) -> Self {
-        Self {
-            engine,
+    ) -> Result<Self> {
+        let partial_every = Duration::from_millis(engine.partial_every_ms());
+        let (jobs, job_rx) = sync_channel(1);
+        let (done_tx, final_done) = channel();
+        let generation = Arc::new(AtomicUsize::new(0));
+        let publication = Arc::new(Mutex::new(()));
+        let partial_busy = Arc::new(AtomicBool::new(false));
+        let worker_generation = generation.clone();
+        let worker_publication = publication.clone();
+        let worker_busy = partial_busy.clone();
+        let worker_tx = tx.clone();
+        let inference = std::thread::Builder::new()
+            .name("taurus-live-inference".into())
+            .spawn(move || {
+                inference_loop(
+                    engine,
+                    worker_generation,
+                    worker_publication,
+                    worker_busy,
+                    job_rx,
+                    done_tx,
+                    worker_tx,
+                );
+            })?;
+        Ok(Self {
+            jobs: Some(jobs),
+            inference: Some(inference),
+            final_done,
+            pending_finals: 0,
+            partial_every,
+            generation,
+            publication,
+            partial_busy,
+            audio_drop_reported: false,
+            inference_error_reported: false,
             lang,
             tx,
             heard: 0,
@@ -187,28 +235,34 @@ impl Worker {
             partial_len: 0,
             level_acc: Vec::new(),
             recent: std::collections::VecDeque::with_capacity(PRE_ROLL + FRAME),
-            alerts: Alerts::default(),
             recording: Some(recording),
-        }
+        })
     }
 
-    fn run(mut self, audio: Receiver<Vec<f32>>, paused: &AtomicBool, stop: &AtomicBool) {
+    fn run(mut self, audio: capture::AudioReceiver, paused: &AtomicBool, stop: &AtomicBool) {
         let mut carry: Vec<f32> = Vec::new();
-        let partial_every = Duration::from_millis(self.engine.partial_every_ms());
         loop {
+            self.drain_final_done();
+            self.report_audio_drops(&audio);
             if stop.load(Ordering::Relaxed) {
                 self.commit();
+                self.finish_finals();
+                self.report_audio_drops(&audio);
+                self.shutdown_inference();
                 let _ = self.tx.send(LiveEvent::Stopped);
                 return;
             }
             let block = match audio.recv_timeout(Duration::from_millis(100)) {
                 Ok(b) => b,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => {
+                Err(capture::AudioRecvError::Timeout) => continue,
+                Err(capture::AudioRecvError::Disconnected) => {
                     let _ = self
                         .tx
                         .send(LiveEvent::Error("the audio source stopped".into()));
                     self.commit();
+                    self.finish_finals();
+                    self.report_audio_drops(&audio);
+                    self.shutdown_inference();
                     let _ = self.tx.send(LiveEvent::Stopped);
                     return;
                 }
@@ -239,7 +293,10 @@ impl Worker {
             }
             let speaking = self.speech_frames > 3;
             let since = self.pending.len().saturating_sub(self.partial_len);
-            if speaking && self.last_partial.elapsed() >= partial_every && since > SAMPLE_RATE / 2 {
+            if speaking
+                && self.last_partial.elapsed() >= self.partial_every
+                && since > SAMPLE_RATE / 2
+            {
                 self.partial();
             }
             let ms = self.pending.len() * 1000 / SAMPLE_RATE;
@@ -301,6 +358,8 @@ impl Worker {
     }
 
     fn reset(&mut self) {
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.pending.clear();
         self.speech_frames = 0;
         self.silence_ms = 0;
@@ -308,21 +367,35 @@ impl Worker {
     }
 
     fn partial(&mut self) {
+        if !acquire_partial(&self.partial_busy) {
+            return;
+        }
         self.last_partial = Instant::now();
-        self.partial_len = self.pending.len();
-        let pcm = self.pending.clone();
-        match self.engine.transcribe(&pcm, &self.lang, true, None) {
-            Ok(segs) => {
-                let sep = if is_cjk(&self.lang) { "" } else { " " };
-                let text = segs
-                    .iter()
-                    .map(|s| s.text.trim())
-                    .collect::<Vec<_>>()
-                    .join(sep);
-                let _ = self.tx.send(LiveEvent::Partial(text));
-                self.alerts.recovered();
+        let expected_generation = self.generation.load(Ordering::Relaxed);
+        let job = InferenceJob::Partial {
+            pcm: self.pending.clone(),
+            lang: self.lang.clone(),
+            expected_generation,
+        };
+        match self
+            .jobs
+            .as_ref()
+            .expect("inference worker is live")
+            .try_send(job)
+        {
+            Ok(()) => self.partial_len = self.pending.len(),
+            Err(TrySendError::Full(_)) => {
+                self.partial_busy.store(false, Ordering::Release);
             }
-            Err(e) => self.error(e),
+            Err(TrySendError::Disconnected(_)) => {
+                self.partial_busy.store(false, Ordering::Release);
+                if !self.inference_error_reported {
+                    self.inference_error_reported = true;
+                    let _ = self.tx.send(LiveEvent::Error(
+                        "Live transcription worker stopped unexpectedly.".into(),
+                    ));
+                }
+            }
         }
     }
 
@@ -337,22 +410,168 @@ impl Worker {
         let base = self.offset_ms + (start * 1000 / SAMPLE_RATE) as i64;
         let dur = (pcm.len() * 1000 / SAMPLE_RATE) as i64;
         self.reset();
-        let language = self.lang.as_str();
-        let engine = &self.engine;
-        commit_stretch(
-            &mut || engine.transcribe(&pcm, language, true, None),
-            &self.tx,
-            &mut self.alerts,
+        let job = InferenceJob::Final {
+            pcm,
+            lang: self.lang.clone(),
             base,
             dur,
-            is_cjk(language),
-        );
+            cjk: is_cjk(&self.lang),
+        };
+        match self
+            .jobs
+            .as_ref()
+            .expect("inference worker is live")
+            .send(job)
+        {
+            Ok(()) => self.pending_finals += 1,
+            Err(e) => {
+                let InferenceJob::Final { base, dur, .. } = e.0 else {
+                    unreachable!("only final jobs are sent synchronously")
+                };
+                self.emit_missed_final(base, dur);
+            }
+        }
         let _ = self.tx.send(LiveEvent::Partial(String::new()));
     }
 
-    fn error(&mut self, e: anyhow::Error) {
-        if let Some(text) = self.alerts.report(&e) {
-            let _ = self.tx.send(LiveEvent::Error(text));
+    fn report_audio_drops(&mut self, audio: &capture::AudioReceiver) {
+        if audio.take_dropped() && !self.audio_drop_reported {
+            self.audio_drop_reported = true;
+            let _ = self.tx.send(LiveEvent::Error(
+                "Live audio was dropped because the capture queue filled.".into(),
+            ));
+        }
+    }
+
+    fn emit_missed_final(&self, base: i64, dur: i64) {
+        let _ = self.tx.send(LiveEvent::Final {
+            start_ms: base,
+            end_ms: base + dur.max(300),
+            text: MISSED_CUE.to_string(),
+        });
+        let _ = self.tx.send(LiveEvent::Error(
+            "The transcription worker stopped before this audio could be decoded.".into(),
+        ));
+    }
+
+    fn drain_final_done(&mut self) {
+        while self.final_done.try_recv().is_ok() {
+            self.pending_finals = self.pending_finals.saturating_sub(1);
+        }
+    }
+
+    fn finish_finals(&mut self) {
+        while self.pending_finals > 0 {
+            match self.final_done.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) => self.pending_finals -= 1,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.pending_finals = 0;
+                    let _ = self.tx.send(LiveEvent::Error(
+                        "The transcription worker stopped before all audio was committed.".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn shutdown_inference(&mut self) {
+        self.jobs.take();
+        if let Some(handle) = self.inference.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+enum InferenceJob {
+    Partial {
+        pcm: Vec<f32>,
+        lang: String,
+        expected_generation: usize,
+    },
+    Final {
+        pcm: Vec<f32>,
+        lang: String,
+        base: i64,
+        dur: i64,
+        cjk: bool,
+    },
+}
+
+struct PartialGuard(Arc<AtomicBool>);
+
+impl Drop for PartialGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn acquire_partial(busy: &AtomicBool) -> bool {
+    busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+fn inference_loop(
+    engine: Engine,
+    generation: Arc<AtomicUsize>,
+    publication: Arc<Mutex<()>>,
+    busy: Arc<AtomicBool>,
+    jobs: Receiver<InferenceJob>,
+    final_done: Sender<()>,
+    tx: Sender<LiveEvent>,
+) {
+    let mut alerts = Alerts::default();
+    while let Ok(job) = jobs.recv() {
+        match job {
+            InferenceJob::Partial {
+                pcm,
+                lang,
+                expected_generation,
+            } => {
+                let _busy = PartialGuard(busy.clone());
+                if generation.load(Ordering::Relaxed) != expected_generation {
+                    continue;
+                }
+                let result = engine.transcribe(&pcm, &lang, true, None);
+                let _publication = publication.lock().unwrap_or_else(|e| e.into_inner());
+                if generation.load(Ordering::Relaxed) != expected_generation {
+                    continue;
+                }
+                match result {
+                    Ok(segs) => {
+                        let sep = if is_cjk(&lang) { "" } else { " " };
+                        let text = segs
+                            .iter()
+                            .map(|s| s.text.trim())
+                            .collect::<Vec<_>>()
+                            .join(sep);
+                        alerts.recovered();
+                        let _ = tx.send(LiveEvent::Partial(text));
+                    }
+                    Err(e) => {
+                        if let Some(text) = alerts.report(&e) {
+                            let _ = tx.send(LiveEvent::Error(text));
+                        }
+                    }
+                }
+            }
+            InferenceJob::Final {
+                pcm,
+                lang,
+                base,
+                dur,
+                cjk,
+            } => {
+                commit_stretch(
+                    &mut || engine.transcribe(&pcm, &lang, true, None),
+                    &tx,
+                    &mut alerts,
+                    base,
+                    dur,
+                    cjk,
+                );
+                let _ = final_done.send(());
+            }
         }
     }
 }
@@ -516,6 +735,15 @@ impl Drop for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_partial_decode_can_be_in_flight() {
+        let busy = AtomicBool::new(false);
+        assert!(acquire_partial(&busy));
+        assert!(!acquire_partial(&busy));
+        busy.store(false, Ordering::Release);
+        assert!(acquire_partial(&busy));
+    }
 
     #[test]
     fn recording_header_matches_samples() {
