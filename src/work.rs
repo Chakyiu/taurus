@@ -3420,10 +3420,23 @@ fn retime(segs: &mut Vec<Segment>) {
         if segs[i].out_ms <= segs[i].in_ms {
             segs[i].out_ms = segs[i].in_ms + 1200;
         }
-        if let Some(next_in) = segs.get(i + 1).map(|n| n.in_ms) {
-            if segs[i].out_ms > next_in - MIN_GAP_MS {
-                segs[i].out_ms = (next_in - MIN_GAP_MS).max(segs[i].in_ms + 200);
-            }
+        let Some(next_in) = segs.get(i + 1).map(|n| n.in_ms) else {
+            break;
+        };
+        let room = next_in - MIN_GAP_MS;
+        if segs[i].out_ms <= room {
+            continue;
+        }
+        if room >= segs[i].in_ms + 200 {
+            segs[i].out_ms = room;
+        } else {
+            // No room to shorten this cue: keep its minimum length and move
+            // the next start instead, so the gap the review checks is real.
+            segs[i].out_ms = segs[i].in_ms + 200;
+            let start = segs[i].out_ms + MIN_GAP_MS;
+            let next = &mut segs[i + 1];
+            next.in_ms = start;
+            next.out_ms = next.out_ms.max(start + 200);
         }
     }
 }
@@ -3528,6 +3541,31 @@ mod tests {
         retime(&mut s);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].out_ms, 1000 - MIN_GAP_MS);
+    }
+
+    #[test]
+    fn retime_moves_the_next_start_when_there_is_no_room() {
+        let mut s = vec![
+            Segment::new(0, 1500, "a", "a"),
+            Segment::new(100, 1200, "b", "b"),
+        ];
+        retime(&mut s);
+        assert!(s[0].out_ms + MIN_GAP_MS <= s[1].in_ms);
+        assert!(s[1].out_ms > s[1].in_ms);
+
+        let p = Project::new(
+            "t".into(),
+            Kind::Subtitle,
+            "t".into(),
+            String::new(),
+            None,
+            Status::Review,
+            "en",
+            "en",
+            s,
+        );
+        let flags = flags_for(&[], &p, 0);
+        assert!(flags.iter().all(|f| f.kind != FlagKind::Gap), "{flags:?}");
     }
 
     #[test]
