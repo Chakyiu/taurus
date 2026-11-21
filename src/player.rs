@@ -28,11 +28,6 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(pcm: Vec<f32>) -> Result<Self> {
-        let duration_ms = (pcm.len() * 1000 / SAMPLE_RATE) as i64;
-        Self::build(pcm, 0, duration_ms, None)
-    }
-
     /// Plays a moving, bounded decode window; the next window is loaded off
     /// the audio callback as playback approaches its end.
     pub fn new_windowed(
@@ -233,6 +228,7 @@ fn sample(pcm: &[f32], at: f64) -> f32 {
 
 /// Reads a capture's 16-bit mono WAV. Samples run to the end of the file, so
 /// a recording whose header was never brought up to date still plays whole.
+#[cfg(test)]
 pub fn read_recording(path: &Path) -> Result<Vec<f32>> {
     read_recording_window(path, 0, recording_duration_ms(path)?)
 }

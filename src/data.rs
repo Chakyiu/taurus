@@ -1056,8 +1056,7 @@ fn refresh_flag_cache(glossary: &[Term], p: &Project, cache: &mut FlagCache) -> 
 
     let mut recomputed = 0;
     cache.entries.resize_with(p.segs.len(), || None);
-    for i in 0..p.segs.len() {
-        let entry = &mut cache.entries[i];
+    for (i, entry) in cache.entries.iter_mut().enumerate() {
         if entry
             .as_ref()
             .is_none_or(|(inputs, _)| !inputs.matches(p, i))

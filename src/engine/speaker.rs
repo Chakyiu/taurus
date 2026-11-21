@@ -102,6 +102,9 @@ const SAME_VOICE: f32 = 0.7;
 
 /// Labels each cue with a speaker number, numbered in order of first
 /// appearance. `spans` are cue times in milliseconds on `pcm`'s clock.
+/// The live paths load audio window by window through [`identify_from`];
+/// only the e2e test hands the whole PCM over at once.
+#[cfg(test)]
 pub fn identify(
     model: &SpeakerModel,
     pcm: &[f32],

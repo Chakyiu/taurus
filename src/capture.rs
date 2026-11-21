@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Sender, TryRecvError, channel};
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -412,7 +412,7 @@ fn display_pixels(id: u32) -> Option<(u32, u32)> {
             CGDisplayModeGetPixelHeight(mode),
         );
         CGDisplayModeRelease(mode);
-        (w > 0 && h > 0).then(|| (w as u32, h as u32))
+        (w > 0 && h > 0).then_some((w as u32, h as u32))
     }
 }
 
