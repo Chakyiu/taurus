@@ -250,7 +250,7 @@ pub fn recording_duration_ms(path: &Path) -> Result<i64> {
 
 /// Reads only the requested range of a 16-bit, 16 kHz mono capture WAV.
 pub fn read_recording_window(path: &Path, start_ms: i64, duration_ms: i64) -> Result<Vec<f32>> {
-    let total_ms = recording_duration_ms(path)?;
+    let total_ms = recording_duration_ms(path)?.max(0) as usize;
     let (start, end) = recording_window_range(total_ms, start_ms, duration_ms);
     let mut file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     file.seek(SeekFrom::Start(44 + start as u64 * 32))?;
