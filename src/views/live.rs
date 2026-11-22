@@ -130,17 +130,26 @@ impl Workbench {
                     .child(mmss(self.live.live_ms())),
             )
             .child(vu)
-            .child(
-                div()
+            .child({
+                // The source note and the in-progress utterance share one line,
+                // so a partial cannot change the strip's height.
+                let mut slot = div()
                     .flex_1()
                     .min_w_0()
                     .text_size(t::T_SMALL)
-                    .text_color(t::text_3())
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_ellipsis()
-                    .when(!bp.mobile(), |d| d.child(note)),
-            )
+                    .text_ellipsis();
+                if let Some(line) = self.live.partial.as_ref() {
+                    let n = line.orig.len().saturating_sub(1);
+                    slot = slot
+                        .text_color(t::text_2())
+                        .child(self.marked_text(join_tokens(&line.orig, n, line.orig_cjk, true)));
+                } else if !bp.mobile() {
+                    slot = slot.text_color(t::text_3()).child(note);
+                }
+                slot
+            })
             .child(
                 if running
                     && self
