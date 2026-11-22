@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use gpui::RenderImage;
 
 use crate::capture::{self, Capture, CaptureKind};
 use crate::engine::Settings;
@@ -59,12 +60,21 @@ impl LiveSession {
         self.video.is_some()
     }
 
+    /// The newest preview frame, if the well has not taken it yet.
+    pub fn preview_frame(&self) -> Option<Arc<RenderImage>> {
+        self.video.as_ref().and_then(|video| video.preview_frame())
+    }
+
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
     }
 
     /// The worker commits what it still holds, then sends `Stopped`.
+    /// The preview stream stops here; the movie stays open until this session drops.
     pub fn stop(&self) {
+        if let Some(video) = &self.video {
+            video.stop_preview();
+        }
         self.stop.store(true, Ordering::Relaxed);
     }
 }

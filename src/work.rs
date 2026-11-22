@@ -223,6 +223,7 @@ impl Workbench {
             changed = true;
         }
         changed |= self.sync_video(cx);
+        changed |= self.sync_live_preview(cx);
         changed |= self.follow_playback();
         self.check_daily_for_update(cx);
         if self.last_save.elapsed() > Duration::from_millis(1500) {
@@ -1742,6 +1743,7 @@ impl Workbench {
         if self.live.status == LiveStatus::Idle {
             return;
         }
+        self.retire_live_preview();
         self.live.offset_ms = self.live.live_ms();
         let session = self.live.session.take();
         self.end_session();
@@ -2087,6 +2089,22 @@ impl Workbench {
             changed = true;
         }
         changed
+    }
+
+    /// Takes the newest preview frame into the well. `video_frame` stays with playback.
+    fn sync_live_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        let frame = self
+            .live
+            .session
+            .as_ref()
+            .and_then(|session| session.preview_frame());
+        let Some(frame) = frame else {
+            return false;
+        };
+        if let Some(old) = self.live_preview.replace(frame) {
+            cx.drop_image(old, None);
+        }
+        true
     }
 
     fn push_video_clock(&self) {

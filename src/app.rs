@@ -503,6 +503,8 @@ pub struct Workbench {
     pub(crate) video_seen: u64,
     /// The frame currently on screen. The previous one is freed from the atlas.
     pub(crate) video_frame: Option<Arc<RenderImage>>,
+    /// The screen being recorded, while this capture is the one on screen.
+    pub(crate) live_preview: Option<Arc<RenderImage>>,
     /// The picture fills the window under the top bar.
     pub(crate) video_app: bool,
     /// The video control put the window into the fullscreen space.
@@ -820,6 +822,7 @@ impl Workbench {
             video: None,
             video_seen: 0,
             video_frame: None,
+            live_preview: None,
             video_app: false,
             video_screen: false,
             retired_video: Vec::new(),
@@ -1544,6 +1547,13 @@ impl Workbench {
         if let Some(frame) = self.video_frame.take() {
             self.retired_video.push(frame);
         }
+        self.retire_live_preview();
+    }
+
+    pub(crate) fn retire_live_preview(&mut self) {
+        if let Some(frame) = self.live_preview.take() {
+            self.retired_video.push(frame);
+        }
     }
 
     // ─── toasts ────────────────────────────────────────────
@@ -2019,6 +2029,7 @@ impl Workbench {
 
     /// Drops the capture outright, without waiting for its last words.
     pub(crate) fn end_session(&mut self) {
+        self.retire_live_preview();
         if let Some(s) = self.live.session.take() {
             s.stop();
         }

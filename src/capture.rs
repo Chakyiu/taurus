@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use gpui::RenderImage;
 
 use crate::media::SAMPLE_RATE;
 
@@ -320,10 +321,48 @@ impl VideoQuality {
 pub struct ScreenRecording {
     stream: screencapturekit::prelude::SCStream,
     output: screencapturekit::recording_output::SCRecordingOutput,
+    /// A smaller stream for the live picture. `None` when preview is off or
+    /// could not start; the movie still runs.
+    preview: Option<Preview>,
+}
+
+/// The latest preview frame sits here until `preview_frame` takes it.
+struct Preview {
+    stream: Mutex<Option<screencapturekit::prelude::SCStream>>,
+    frames: Arc<Mutex<Option<Arc<RenderImage>>>>,
+}
+
+impl ScreenRecording {
+    /// Stops the preview stream. The movie keeps writing until this value is dropped.
+    pub(crate) fn stop_preview(&self) {
+        let Some(preview) = &self.preview else {
+            return;
+        };
+        if let Some(stream) = preview
+            .stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = stream.stop_capture();
+        }
+    }
+
+    /// The newest frame `pump` has not taken. A frame still sitting here when
+    /// the next one arrives is dropped without `drop_image`.
+    pub(crate) fn preview_frame(&self) -> Option<Arc<RenderImage>> {
+        let preview = self.preview.as_ref()?;
+        preview
+            .frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
 }
 
 impl Drop for ScreenRecording {
     fn drop(&mut self) {
+        self.stop_preview();
         let _ = self.stream.remove_recording_output(&self.output);
         let _ = self.stream.stop_capture();
     }
@@ -372,6 +411,11 @@ fn display_for_windows(windows: &[Rect], displays: &[Rect]) -> Option<usize> {
     Some(best)
 }
 
+/// Live preview height. Both sides of the picture stay even.
+pub const PREVIEW_MAX_HEIGHT: u32 = 480;
+/// Live preview frame rate.
+pub const PREVIEW_FPS: u32 = 8;
+
 /// The movie's size for a display whose current mode is `pixels` wide and
 /// tall: that size itself, capped. Full quality keeps the display's own pixels
 /// up to 4K across; the other qualities cap the height. Both sides are rounded
@@ -383,8 +427,20 @@ fn movie_size(pixels: (u32, u32), quality: VideoQuality) -> (u32, u32) {
         Some(max) => (max as f64 / h).min(1.0),
         None => (3840.0 / w).min(1.0),
     };
-    let even = |v: f64| ((v.round() as u32) / 2 * 2).max(2);
-    (even(w * shrink), even(h * shrink))
+    (even_side(w * shrink), even_side(h * shrink))
+}
+
+/// Preview size for a display of `pixels`: the same even rounding as
+/// `movie_size`, with the height capped at [`PREVIEW_MAX_HEIGHT`].
+fn preview_size(pixels: (u32, u32)) -> (u32, u32) {
+    let w = pixels.0.max(1) as f64;
+    let h = pixels.1.max(1) as f64;
+    let shrink = (PREVIEW_MAX_HEIGHT as f64 / h).min(1.0);
+    (even_side(w * shrink), even_side(h * shrink))
+}
+
+fn even_side(v: f64) -> u32 {
+    ((v.round() as u32) / 2 * 2).max(2)
 }
 
 #[cfg_attr(
@@ -548,7 +604,111 @@ pub fn record_screen(
     stream
         .start_capture()
         .map_err(|e| anyhow!("could not start the screen recording: {e}"))?;
-    Ok(ScreenRecording { stream, output })
+    let preview = match std::env::var("TAURUS_PREVIEW").ok().as_deref() {
+        Some("0") => None,
+        Some("fail") => {
+            eprintln!(
+                "taurus: live preview did not start (TAURUS_PREVIEW=fail); the movie continues"
+            );
+            None
+        }
+        _ => match open_preview(&filter, pixels) {
+            Ok(preview) => Some(preview),
+            Err(e) => {
+                eprintln!("taurus: live preview did not start ({e:#}); the movie continues");
+                None
+            }
+        },
+    };
+    Ok(ScreenRecording {
+        stream,
+        output,
+        preview,
+    })
+}
+
+/// A second stream on `filter`, scaled for the live well. The recording stream
+/// is left alone: a screen handler on it shares the movie's surface pool.
+fn open_preview(
+    filter: &screencapturekit::prelude::SCContentFilter,
+    pixels: (u32, u32),
+) -> Result<Preview> {
+    use screencapturekit::prelude::*;
+
+    let (w, h) = preview_size(pixels);
+    let config = SCStreamConfiguration::new()
+        .with_width(w)
+        .with_height(h)
+        .with_scales_to_fit(true)
+        .with_fps(PREVIEW_FPS)
+        .with_pixel_format(PixelFormat::BGRA)
+        .with_queue_depth(3)
+        .with_shows_cursor(true)
+        .with_captures_audio(false);
+    let frames = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&frames);
+    let mut stream = SCStream::new(filter, &config).map_err(|e| anyhow!("{e}"))?;
+    stream
+        .add_output_handler(
+            move |sample, kind| {
+                if !matches!(kind, SCStreamOutputType::Screen) {
+                    return;
+                }
+                let Some(image) = preview_image(&sample) else {
+                    return;
+                };
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(image);
+            },
+            SCStreamOutputType::Screen,
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+    stream
+        .start_capture()
+        .map_err(|e| anyhow!("could not start the live preview: {e}"))?;
+    eprintln!("taurus: previewing the screen as {w}x{h}");
+    Ok(Preview {
+        stream: Mutex::new(Some(stream)),
+        frames,
+    })
+}
+
+/// Copies one BGRA frame out of a locked pixel buffer. Rows are padded to
+/// `bytes_per_row`; copying that stride into a packed image tears the picture.
+fn preview_image(sample: &screencapturekit::prelude::CMSampleBuffer) -> Option<Arc<RenderImage>> {
+    use screencapturekit::cv::CVPixelBufferLockFlags;
+    use screencapturekit::prelude::CMSampleBufferExt;
+
+    let buffer = sample.pixel_buffer()?;
+    let guard = buffer.lock(CVPixelBufferLockFlags::READ_ONLY).ok()?;
+    // The guard keeps this mapping alive; the copy finishes before it drops.
+    let src = unsafe { guard.as_slice() }?;
+    let image = copy_bgra(src, guard.width(), guard.height(), guard.bytes_per_row())?;
+    drop(guard);
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+}
+
+fn copy_bgra(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+) -> Option<image::RgbaImage> {
+    let row_bytes = width.checked_mul(4)?;
+    if width == 0 || height == 0 || bytes_per_row < row_bytes {
+        return None;
+    }
+    let need = bytes_per_row.checked_mul(height)?;
+    if src.len() < need {
+        return None;
+    }
+    let (w, h) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
+    let mut packed = vec![0u8; row_bytes * height];
+    for y in 0..height {
+        let from = y * bytes_per_row;
+        let to = y * row_bytes;
+        packed[to..to + row_bytes].copy_from_slice(&src[from..from + row_bytes]);
+    }
+    image::RgbaImage::from_raw(w, h, packed)
 }
 
 pub(crate) fn start(kind: CaptureKind, sink: AudioSender) -> Result<Capture> {
@@ -933,6 +1093,29 @@ mod tests {
     #[test]
     fn a_display_that_reports_nothing_still_gets_a_valid_size() {
         assert_eq!(movie_size((0, 0), VideoQuality::Full), (2, 2));
+    }
+
+    #[test]
+    fn preview_is_capped_at_480_and_even() {
+        assert_eq!(preview_size((1920, 1080)), (852, 480));
+        assert_eq!(preview_size((3024, 1964)), (738, 480));
+        assert_eq!(preview_size((640, 360)), (640, 360));
+        assert_eq!(preview_size((101, 80)), (100, 80));
+        assert_eq!(preview_size((0, 0)), (2, 2));
+    }
+
+    #[test]
+    fn padded_rows_are_not_copied_into_the_picture() {
+        let mut src = vec![0xABu8; 12 * 2];
+        src[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        src[12..20].copy_from_slice(&[10, 11, 12, 13, 14, 15, 16, 17]);
+        let image = copy_bgra(&src, 2, 2, 12).unwrap();
+        assert_eq!(
+            image.as_raw(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17]
+        );
+        assert!(copy_bgra(&[0; 8], 2, 2, 8).is_none());
+        assert!(copy_bgra(&[1, 2, 3, 4], 1, 1, 4).is_some());
     }
 
     #[test]
