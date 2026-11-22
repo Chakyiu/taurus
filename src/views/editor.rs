@@ -108,6 +108,12 @@ impl Workbench {
         let show_summary = self.summary_job.as_ref().is_some_and(|j| j.pid == pid)
             || self.current().is_some_and(|p| !p.summary.trim().is_empty());
         let show_video = self.video_file(p).is_some();
+        let previewing = capturing
+            && self
+                .live
+                .session
+                .as_ref()
+                .is_some_and(|session| session.records_video());
         let fill = show_video && self.video_app;
         let fullscreen = window.is_fullscreen();
         // The lines are hidden while the picture fills the window, so skip laying them out.
@@ -148,6 +154,9 @@ impl Workbench {
             })
             .when(!fill && show_summary && !capturing, |d| {
                 d.child(self.summary_panel(bp, cx))
+            })
+            .when(previewing && !show_video, |d| {
+                d.child(self.live_preview_well(bp))
             })
             .when(show_video, |d| {
                 d.child(self.video_stage(bp, fill, fullscreen, cx))
@@ -193,6 +202,43 @@ impl Workbench {
         self.video_app = false;
         self.video_screen = false;
         cx.notify();
+    }
+
+    /// The screen being recorded, in the slot the playback picture uses later.
+    fn live_preview_well(&self, bp: Bp) -> AnyElement {
+        let h = if bp.mobile() { 188. } else { 300. };
+        let frame = self.live_preview.clone();
+        div()
+            .id("live-preview")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .overflow_hidden()
+            .mx(bp.pad_x())
+            .mt(px(8.))
+            .h(px(h))
+            .rounded(t::R_LG)
+            .bg(rgb(0x05080A))
+            .when_some(frame, |d, frame| {
+                d.child(img(frame).flex_1().w_full().object_fit(ObjectFit::Contain))
+            })
+            .when(self.live_preview.is_none(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .px(px(24.))
+                        .text_size(t::T_SMALL)
+                        .text_color(t::text_2())
+                        .text_center()
+                        .child("Waiting for the picture…"),
+                )
+            })
+            .into_any_element()
     }
 
     /// The picture for this project, with the cue at the playhead drawn on it.
