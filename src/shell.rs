@@ -63,7 +63,7 @@ impl Workbench {
             )
             .on_click(cx.listener(|this, _, w, cx| this.show_view(View::Projects, w, cx)))
         };
-        let mut left = row().gap(px(6.)).min_w_0();
+        let mut left = row().gap(px(6.)).flex_1().min_w_0().overflow_hidden();
         let mut right = row().flex_none().gap(px(6.)).children(update);
         match self.view {
             View::Projects => {
@@ -160,10 +160,11 @@ impl Workbench {
                 }
             }
         }
+        // In-flow flex spacers stayed content-sized; pin the row to the title bar instead.
         div()
             .relative()
             .flex_none()
-            .w_full()
+            .w(px(bp.w))
             .h(px(48.))
             .border_b_1()
             .border_color(t::line_soft())
@@ -177,19 +178,15 @@ impl Workbench {
             )
             .child(
                 row()
-                    .size_full()
-                    .pr(px(10.))
-                    .child(div().w(px(78.)).h_full().flex_none())
-                    .child(
-                        row()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .items_center()
-                            .child(left)
-                            .child(fill())
-                            .child(right),
-                    ),
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(78.))
+                    .right(px(10.))
+                    .gap(px(12.))
+                    .items_center()
+                    .child(left)
+                    .child(right),
             )
             .into_any_element()
     }
