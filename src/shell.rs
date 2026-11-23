@@ -180,9 +180,16 @@ impl Workbench {
                     .size_full()
                     .pr(px(10.))
                     .child(div().w(px(78.)).h_full().flex_none())
-                    .child(left)
-                    .child(div().flex_1().h_full().min_w(px(12.)))
-                    .child(right),
+                    .child(
+                        row()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .items_center()
+                            .child(left)
+                            .child(fill())
+                            .child(right),
+                    ),
             )
             .into_any_element()
     }
