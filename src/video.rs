@@ -15,6 +15,12 @@ use gpui::RenderImage;
 
 const FPS: i64 = 12;
 
+/// Editor frames keep the file's own pixels. A `scale=` cap resamples the
+/// picture, and JPEG q=8 then blurs text the movie still has. Crop only
+/// drops a leftover odd column so the encoder gets an even size.
+const PLAYBACK_VF: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2,fps=12";
+const PLAYBACK_Q: &str = "2";
+
 /// The line to draw on the picture. The translation is the line being read
 /// when the project has one; the original sits above it.
 pub(crate) struct OverlayLine {
@@ -262,9 +268,9 @@ fn open_pipe(path: &Path, ms: i64, slot: &Arc<Mutex<Option<Child>>>) -> Result<P
             "-sn",
             "-dn",
             "-vf",
-            "scale=w='min(3840,iw)':h=-2,fps=12",
+            PLAYBACK_VF,
             "-q:v",
-            "8",
+            PLAYBACK_Q,
             "-f",
             "image2pipe",
             "-vcodec",
@@ -415,6 +421,13 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_keeps_the_file_resolution() {
+        assert!(!PLAYBACK_VF.contains("scale"));
+        assert_eq!(PLAYBACK_Q, "2");
+        assert!(PLAYBACK_VF.contains("fps=12"));
+    }
 
     #[test]
     fn splits_jpegs_out_of_a_byte_stream() {

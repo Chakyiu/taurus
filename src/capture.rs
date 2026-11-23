@@ -432,6 +432,26 @@ fn even_side(v: f64) -> u32 {
     ((v.round() as u32) / 2 * 2).max(2)
 }
 
+/// `scalesToFit` resamples. Leave it off when `output` is already the display's
+/// own even pixel size; a smaller quality step still has to scale down.
+fn output_is_scaled(native: (u32, u32), output: (u32, u32)) -> bool {
+    let native = (
+        even_side(f64::from(native.0)),
+        even_side(f64::from(native.1)),
+    );
+    output != native
+}
+
+/// Automatic capture resolution grabs a Retina display at point size and then
+/// scales up to the configured width and height. That upscale is a blurry
+/// preview of a sharp movie. `Best` is the display's pixels.
+fn use_best_capture(config: &mut screencapturekit::prelude::SCStreamConfiguration) {
+    use screencapturekit::stream::configuration::SCCaptureResolutionType;
+    if let Err(e) = config.set_capture_resolution_type(SCCaptureResolutionType::Best) {
+        eprintln!("taurus: capture resolution stayed automatic ({e})");
+    }
+}
+
 #[cfg_attr(
     target_vendor = "apple",
     link(name = "CoreGraphics", kind = "framework")
@@ -552,10 +572,10 @@ pub fn record_screen(
         pixels.0,
         pixels.1
     );
-    let config = SCStreamConfiguration::new()
+    let mut config = SCStreamConfiguration::new()
         .with_width(w)
         .with_height(h)
-        .with_scales_to_fit(true)
+        .with_scales_to_fit(output_is_scaled(pixels, (w, h)))
         .with_minimum_frame_interval(&CMTime::new(1, quality.fps()))
         .with_shows_cursor(true)
         .with_captures_audio(system_audio)
@@ -564,6 +584,7 @@ pub fn record_screen(
         .with_channel_count(2)
         .with_captures_microphone(microphone)
         .map_err(|e| anyhow!("{e}"))?;
+    use_best_capture(&mut config);
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -627,17 +648,19 @@ fn open_preview(
     use screencapturekit::prelude::*;
 
     let (w, h) = movie_size(pixels, quality);
-    let config = SCStreamConfiguration::new()
+    let mut config = SCStreamConfiguration::new()
         .with_width(w)
         .with_height(h)
-        .with_scales_to_fit(true)
+        .with_scales_to_fit(output_is_scaled(pixels, (w, h)))
         .with_fps(PREVIEW_FPS)
         .with_pixel_format(PixelFormat::BGRA)
         .with_queue_depth(3)
         .with_shows_cursor(true)
         .with_captures_audio(false);
+    use_best_capture(&mut config);
     let frames = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&frames);
+    let logged = AtomicBool::new(false);
     let mut stream = SCStream::new(filter, &config).map_err(|e| anyhow!("{e}"))?;
     stream
         .add_output_handler(
@@ -648,6 +671,16 @@ fn open_preview(
                 let Some(image) = preview_image(&sample) else {
                     return;
                 };
+                if !logged.swap(true, Ordering::Relaxed) {
+                    let size = image.size(0);
+                    let (iw, ih) = (
+                        u32::try_from(size.width.0).unwrap_or(0),
+                        u32::try_from(size.height.0).unwrap_or(0),
+                    );
+                    if iw != w || ih != h {
+                        eprintln!("taurus: preview frame is {iw}x{ih}, asked for {w}x{h}");
+                    }
+                }
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(image);
             },
             SCStreamOutputType::Screen,
@@ -1084,6 +1117,23 @@ mod tests {
     #[test]
     fn a_display_that_reports_nothing_still_gets_a_valid_size() {
         assert_eq!(movie_size((0, 0), VideoQuality::Full), (2, 2));
+    }
+
+    #[test]
+    fn full_quality_is_not_rescaled() {
+        assert!(!output_is_scaled((3024, 1964), (3024, 1964)));
+        assert!(output_is_scaled(
+            (3024, 1964),
+            movie_size((3024, 1964), VideoQuality::Standard)
+        ));
+        assert!(output_is_scaled(
+            (3024, 1964),
+            movie_size((3024, 1964), VideoQuality::Small)
+        ));
+        assert!(output_is_scaled(
+            (5120, 1440),
+            movie_size((5120, 1440), VideoQuality::Full)
+        ));
     }
 
     #[test]
