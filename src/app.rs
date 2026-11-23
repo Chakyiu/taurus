@@ -494,6 +494,7 @@ pub struct Workbench {
     pub exp: ExportState,
 
     pub new_menu: bool,
+    pub editor_more: bool,
     /// The open project's audio, once it has been played.
     pub player: Option<(String, crate::player::Player)>,
     /// The project whose audio is being decoded, and where to start it.
@@ -817,6 +818,7 @@ impl Workbench {
                 dragging_wrap: false,
             },
             new_menu: false,
+            editor_more: false,
             player: None,
             player_loading: None,
             video: None,
@@ -1034,6 +1036,7 @@ impl Workbench {
         self.view = view;
         self.open_select = None;
         self.new_menu = false;
+        self.editor_more = false;
         self.pause_playback();
         self.stop_editing(window, cx);
         self.settle_all();
@@ -1528,6 +1531,12 @@ impl Workbench {
 
     pub fn toggle_new_menu(&mut self, cx: &mut Context<Self>) {
         self.new_menu = !self.new_menu;
+        self.open_select = None;
+        cx.notify();
+    }
+
+    pub fn toggle_editor_more(&mut self, cx: &mut Context<Self>) {
+        self.editor_more = !self.editor_more;
         self.open_select = None;
         cx.notify();
     }

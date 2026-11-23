@@ -184,6 +184,8 @@ impl Workbench {
             .child(
                 row()
                     .flex_none()
+                    .min_w(px(148.))
+                    .justify_end()
                     .gap(px(7.))
                     .text_size(t::T_SMALL)
                     .text_color(color)

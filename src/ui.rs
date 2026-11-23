@@ -85,6 +85,7 @@ pub fn button(
     disabled: bool,
 ) -> Stateful<Div> {
     let icon_only = matches!(kind, Btn::Icon | Btn::IconDanger);
+    let square = ic.is_some() && text.is_none();
     let (bg, border, fg, hover_bg, hover_border, hover_fg) = match kind {
         Btn::Quiet => (
             gpui::transparent_black(),
@@ -157,8 +158,8 @@ pub fn button(
         .text_size(t::T_CONTROL)
         .font_weight(weight(fw))
         .whitespace_nowrap()
-        .when(icon_only, |d| d.w(px(36.)))
-        .when(!icon_only, |d| {
+        .when(icon_only || square, |d| d.w(px(36.)))
+        .when(!icon_only && !square, |d| {
             d.px(px(if kind == Btn::Quiet { 10. } else { 14. }))
         });
 

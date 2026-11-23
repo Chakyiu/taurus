@@ -114,13 +114,14 @@ impl Workbench {
                 );
             }
             View::Editor => {
-                left = left.child(back());
+                left = left.flex_1().min_w_0().child(back());
                 if let Some(p) = self.current() {
                     let status = self.status_text(p);
                     left = left
                         .child(
                             div()
                                 .id("top-name")
+                                .flex_1()
                                 .min_w_0()
                                 .px(px(8.))
                                 .py(px(4.))
@@ -150,29 +151,12 @@ impl Workbench {
                             )
                         });
                     let can = !p.segs.is_empty();
-                    right = right
-                        .child(
-                            button(
-                                "top-settings",
-                                Btn::Quiet,
-                                Some(Icon::Sliders),
-                                (!bp.mobile()).then_some("Settings"),
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.open_project_settings(cx))),
-                        )
-                        .child(
-                            button(
-                                "top-export",
-                                Btn::Ghost,
-                                Some(Icon::Download),
-                                Some("Export"),
-                                !can,
-                            )
+                    right = right.child(
+                        button("top-export", Btn::Icon, Some(Icon::Download), None, !can)
                             .when(can, |d| {
                                 d.on_click(cx.listener(|this, _, _, cx| this.open_export(cx)))
                             }),
-                        );
+                    );
                 }
             }
         }
@@ -197,7 +181,7 @@ impl Workbench {
                     .pr(px(10.))
                     .child(div().w(px(78.)).h_full().flex_none())
                     .child(left)
-                    .child(div().flex_1().h_full().min_w(px(12.)))
+                    .child(div().w(px(12.)).flex_none().h_full())
                     .child(right),
             )
             .into_any_element()
@@ -1714,9 +1698,10 @@ impl Render for Workbench {
                 if k.key != "escape" {
                     return;
                 }
-                if this.open_select.is_some() || this.new_menu {
+                if this.open_select.is_some() || this.new_menu || this.editor_more {
                     this.open_select = None;
                     this.new_menu = false;
+                    this.editor_more = false;
                     cx.stop_propagation();
                     cx.notify();
                 } else if this.dialog.is_some() {
