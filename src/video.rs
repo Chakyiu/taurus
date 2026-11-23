@@ -262,7 +262,7 @@ fn open_pipe(path: &Path, ms: i64, slot: &Arc<Mutex<Option<Child>>>) -> Result<P
             "-sn",
             "-dn",
             "-vf",
-            "scale=w='min(960,iw)':h=-2,fps=12",
+            "scale=w='min(3840,iw)':h=-2,fps=12",
             "-q:v",
             "8",
             "-f",
