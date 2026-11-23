@@ -620,7 +620,7 @@ impl Workbench {
                     ),
             );
 
-        let mut bar = row()
+        let bar = row()
             .flex_none()
             .flex_wrap()
             .gap(px(12.))
