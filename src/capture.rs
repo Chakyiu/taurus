@@ -321,8 +321,8 @@ impl VideoQuality {
 pub struct ScreenRecording {
     stream: screencapturekit::prelude::SCStream,
     output: screencapturekit::recording_output::SCRecordingOutput,
-    /// A smaller stream for the live picture. `None` when preview is off or
-    /// could not start; the movie still runs.
+    /// A second stream for the live picture (same size as the movie, lower fps).
+    /// `None` when preview is off or could not start; the movie still runs.
     preview: Option<Preview>,
 }
 
@@ -411,9 +411,7 @@ fn display_for_windows(windows: &[Rect], displays: &[Rect]) -> Option<usize> {
     Some(best)
 }
 
-/// Live preview height. Both sides of the picture stay even.
-pub const PREVIEW_MAX_HEIGHT: u32 = 480;
-/// Live preview frame rate.
+/// Live preview frame rate. Resolution follows [`VideoQuality`] like the movie.
 pub const PREVIEW_FPS: u32 = 8;
 
 /// The movie's size for a display whose current mode is `pixels` wide and
@@ -427,15 +425,6 @@ fn movie_size(pixels: (u32, u32), quality: VideoQuality) -> (u32, u32) {
         Some(max) => (max as f64 / h).min(1.0),
         None => (3840.0 / w).min(1.0),
     };
-    (even_side(w * shrink), even_side(h * shrink))
-}
-
-/// Preview size for a display of `pixels`: the same even rounding as
-/// `movie_size`, with the height capped at [`PREVIEW_MAX_HEIGHT`].
-fn preview_size(pixels: (u32, u32)) -> (u32, u32) {
-    let w = pixels.0.max(1) as f64;
-    let h = pixels.1.max(1) as f64;
-    let shrink = (PREVIEW_MAX_HEIGHT as f64 / h).min(1.0);
     (even_side(w * shrink), even_side(h * shrink))
 }
 
@@ -612,7 +601,7 @@ pub fn record_screen(
             );
             None
         }
-        _ => match open_preview(&filter, pixels) {
+        _ => match open_preview(&filter, pixels, quality) {
             Ok(preview) => Some(preview),
             Err(e) => {
                 eprintln!("taurus: live preview did not start ({e:#}); the movie continues");
@@ -627,15 +616,17 @@ pub fn record_screen(
     })
 }
 
-/// A second stream on `filter`, scaled for the live well. The recording stream
-/// is left alone: a screen handler on it shares the movie's surface pool.
+/// A second stream on `filter` for the live well at the same resolution as the
+/// movie. The recording stream is left alone: a screen handler on it shares
+/// the movie's surface pool.
 fn open_preview(
     filter: &screencapturekit::prelude::SCContentFilter,
     pixels: (u32, u32),
+    quality: VideoQuality,
 ) -> Result<Preview> {
     use screencapturekit::prelude::*;
 
-    let (w, h) = preview_size(pixels);
+    let (w, h) = movie_size(pixels, quality);
     let config = SCStreamConfiguration::new()
         .with_width(w)
         .with_height(h)
@@ -1093,15 +1084,6 @@ mod tests {
     #[test]
     fn a_display_that_reports_nothing_still_gets_a_valid_size() {
         assert_eq!(movie_size((0, 0), VideoQuality::Full), (2, 2));
-    }
-
-    #[test]
-    fn preview_is_capped_at_480_and_even() {
-        assert_eq!(preview_size((1920, 1080)), (852, 480));
-        assert_eq!(preview_size((3024, 1964)), (738, 480));
-        assert_eq!(preview_size((640, 360)), (640, 360));
-        assert_eq!(preview_size((101, 80)), (100, 80));
-        assert_eq!(preview_size((0, 0)), (2, 2));
     }
 
     #[test]
