@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, ClickEvent, Context, Div, Focusable as _,
+    Animation, AnimationExt as _, AnyElement, ClickEvent, Context, Corner, Div, Focusable as _,
     HighlightStyle, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, ParentElement, SharedString, StatefulInteractiveElement,
-    StrikethroughStyle, Styled, StyledImage as _, StyledText, Window, canvas, div, img, px,
-    relative, rgb, rgba,
+    StrikethroughStyle, Styled, StyledImage as _, StyledText, Window, anchored, canvas, deferred,
+    div, img, px, relative, rgb, rgba,
 };
 use gpui_component::input::Input;
 
@@ -120,17 +120,31 @@ impl Workbench {
         let body = if fill {
             None
         } else if p.segs.is_empty() {
-            let text = if capturing {
-                self.live.engine_note.clone().unwrap_or_else(|| {
-                    "Listening. Lines appear here as soon as someone speaks.".into()
-                })
-            } else if extracting {
-                "Lines appear here as soon as the track is read.".into()
-            } else {
-                "This project has no lines.".into()
-            };
             let partial = capturing.then(|| self.heard_line(bp)).flatten();
-            Some(
+            Some(if capturing && self.live.partial.is_none() {
+                col()
+                    .flex_1()
+                    .justify_center()
+                    .px(bp.pad_x())
+                    .children(partial)
+                    .child(empty_state(
+                        "Listening",
+                        self.live.engine_note.clone().unwrap_or_else(|| {
+                            "Lines appear here as soon as someone speaks.".into()
+                        }),
+                        vec![],
+                    ))
+                    .into_any_element()
+            } else {
+                let text = if capturing {
+                    self.live.engine_note.clone().unwrap_or_else(|| {
+                        "Listening. Lines appear here as soon as someone speaks.".into()
+                    })
+                } else if extracting {
+                    "Lines appear here as soon as the track is read.".into()
+                } else {
+                    "This project has no lines.".into()
+                };
                 col()
                     .flex_1()
                     .px(bp.pad_x())
@@ -138,11 +152,13 @@ impl Workbench {
                     .when(!capturing || self.live.partial.is_none(), |d| {
                         d.child(hint(text).py(px(24.)).text_center())
                     })
-                    .into_any_element(),
-            )
+                    .into_any_element()
+            })
         } else {
             Some(self.line_list(bp, capturing, window, cx))
         };
+        let listening_footer =
+            capturing && !p.segs.is_empty() && self.live.partial.is_none() && !fill;
         screen()
             .when(
                 self.video_export.as_ref().is_some_and(|j| j.pid == pid),
@@ -163,6 +179,23 @@ impl Workbench {
                     .children(self.audio_source(p).map(|_| self.transport(bp, cx)))
             })
             .children(body)
+            .when(listening_footer, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(t::line_soft())
+                        .bg(t::surface())
+                        .min_h(px(48.))
+                        .px(bp.pad_x())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(t::T_SMALL)
+                        .text_color(t::text_3())
+                        .child("Still listening. The next line will appear here."),
+                )
+            })
             .when(!show_video, |d| {
                 d.children(self.audio_source(p).map(|_| self.transport(bp, cx)))
             })
@@ -508,14 +541,57 @@ impl Workbench {
         let can_reprocess = self.audio_source(p).is_some()
             && p.status != Status::Working
             && p.status != Status::Live;
-        row()
-            .flex_none()
-            .gap(px(14.))
-            .px(bp.pad_x())
-            .py(px(8.))
-            .text_size(t::T_SMALL)
-            .text_color(t::text_2())
-            .child(count)
+        let correcting = self.correcting.as_ref().is_some_and(|j| j.pid == p.id);
+        let summarizing = self.summary_job.as_ref().is_some_and(|j| j.pid == p.id);
+        let show_summarize = p.summary.trim().is_empty() && !summarizing;
+        let lang_label = if p.translate {
+            format!("{} → {}", lang_name(&p.from), lang_name(&p.to))
+        } else {
+            lang_name(&p.from)
+        };
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Primary {
+            Translate,
+            Speakers,
+            Correct,
+        }
+        let hide_right = p.status == Status::Working;
+        let primary = if hide_right {
+            None
+        } else if !p.translate {
+            Some(Primary::Translate)
+        } else if can_identify && !p.has_speakers() {
+            Some(Primary::Speakers)
+        } else {
+            Some(Primary::Correct)
+        };
+
+        let more_row = |id: &'static str, label: &'static str, disabled: bool| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(t::R_SM)
+                .text_size(t::T_CONTROL)
+                .when(disabled, |d| {
+                    d.opacity(0.65)
+                        .cursor(gpui::CursorStyle::OperationNotAllowed)
+                })
+                .when(!disabled, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(t::surface_3()))
+                })
+                .child(label)
+        };
+
+        let left = row()
+            .gap(px(12.))
+            .child(
+                div()
+                    .text_size(t::T_SMALL)
+                    .text_color(t::text_2())
+                    .child(count),
+            )
             .when(stats.flagged > 0 || only, |d| {
                 d.child(
                     switch(
@@ -526,134 +602,174 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_review_only(w, cx))),
                 )
             })
-            .child(fill())
-            .when(can_reprocess || reprocessing, |d| {
-                d.child(
-                    button(
-                        "ed-reprocess",
-                        Btn::Quiet,
-                        Some(Icon::Captions),
-                        Some(if reprocessing {
-                            "Reprocessing…"
-                        } else {
-                            "Reprocess subtitle"
-                        }),
-                        reprocessing,
-                    )
-                    .when(!reprocessing, |d| {
-                        d.on_click(cx.listener(|this, _, _, cx| this.ask_reprocess(cx)))
-                    }),
-                )
-            })
-            .map(|d| {
-                let busy = self.correcting.as_ref().is_some_and(|j| j.pid == p.id);
-                d.child(
-                    button(
-                        "ed-correct",
-                        Btn::Quiet,
-                        Some(Icon::Wand),
-                        Some(if busy { "Correcting…" } else { "Correct" }),
-                        busy,
-                    )
-                    .when(!busy, |d| {
-                        d.on_click(cx.listener(|this, _, w, cx| this.open_correct(w, cx)))
-                    }),
-                )
-            })
-            .when(
-                p.summary.trim().is_empty()
-                    && self.summary_job.as_ref().is_none_or(|j| j.pid != p.id),
-                |d| {
-                    d.child(
-                        button(
-                            "ed-summarize",
-                            Btn::Quiet,
-                            Some(Icon::Summary),
-                            Some("Summarize"),
-                            false,
+            .child(
+                row()
+                    .gap(px(8.))
+                    .items_center()
+                    .when(!bp.mobile(), |d| {
+                        d.child(
+                            div()
+                                .text_size(t::T_SMALL)
+                                .text_color(t::text_2())
+                                .child(lang_label),
                         )
-                        .on_click(cx.listener(|this, _, w, cx| this.open_summarize(w, cx))),
-                    )
-                },
-            )
-            .when(
-                self.summary_job.as_ref().is_some_and(|j| j.pid == p.id),
-                |d| {
-                    d.child(button(
-                        "ed-summarize",
-                        Btn::Quiet,
-                        Some(Icon::Summary),
-                        Some("Summarizing…"),
-                        true,
-                    ))
-                },
-            )
-            .when(can_identify, |d| {
-                d.child(
-                    button(
-                        "ed-speakers",
-                        Btn::Quiet,
-                        Some(Icon::Users),
-                        Some(if p.has_speakers() {
-                            "Identify again"
-                        } else {
-                            "Identify speakers"
-                        }),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.identify_speakers(cx))),
-                )
-            })
-            .when(p.video_path.is_some() && p.status != Status::Live, |d| {
-                d.child(
-                    button(
-                        "ed-video",
-                        Btn::Quiet,
-                        Some(Icon::Film),
-                        Some("Open video"),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_video(cx))),
-                )
-            })
-            .when(p.kind == Kind::Audio && p.source_path.is_some(), |d| {
-                d.child(
-                    button(
-                        "ed-audio",
-                        Btn::Quiet,
-                        Some(Icon::Waveform),
-                        Some("Show audio"),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.reveal_recording(cx))),
-                )
-            })
-            .when(!p.translate && p.status != Status::Working, |d| {
-                d.child(
-                    button(
-                        "ed-translate",
-                        Btn::Quiet,
-                        Some(Icon::Translate),
-                        Some("Translate"),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_translate(cx))),
-                )
-            })
-            .when(p.translate && p.status != Status::Working, |d| {
-                d.child(
-                    button(
-                        "ed-retranslate-all",
-                        Btn::Quiet,
-                        Some(Icon::Refresh),
-                        Some("Retranslate all"),
-                        false,
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, w, cx| this.retranslate(all.clone(), w, cx)),
+                    })
+                    .child(
+                        button("ed-langs", Btn::Icon, Some(Icon::Sliders), None, false)
+                            .on_click(cx.listener(|this, _, _, cx| this.open_project_settings(cx))),
                     ),
+            );
+
+        let bar = row()
+            .flex_none()
+            .flex_wrap()
+            .gap(px(12.))
+            .px(bp.pad_x())
+            .py(px(8.))
+            .child(left);
+        if hide_right {
+            return bar;
+        }
+        let mut right = row().flex_none().gap(px(8.));
+        if let Some(primary) = primary {
+            let (bid, ic, busy) = match primary {
+                Primary::Translate => ("ed-translate", Icon::Translate, false),
+                Primary::Speakers => ("ed-speakers", Icon::Users, false),
+                Primary::Correct => ("ed-correct", Icon::Wand, correcting),
+            };
+            let mut sq = button(bid, Btn::Primary, Some(ic), None, busy);
+            if !busy {
+                sq = match primary {
+                    Primary::Translate => {
+                        sq.on_click(cx.listener(|this, _, _, cx| this.open_translate(cx)))
+                    }
+                    Primary::Speakers => {
+                        sq.on_click(cx.listener(|this, _, _, cx| this.identify_speakers(cx)))
+                    }
+                    Primary::Correct => {
+                        sq.on_click(cx.listener(|this, _, w, cx| this.open_correct(w, cx)))
+                    }
+                };
+            }
+            right = right.child(sq);
+        }
+
+        let more_trigger = button("ed-more", Btn::Icon, Some(Icon::Chevron), None, false)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_more(cx)));
+        let mut more_wrap = div().flex_none().child(more_trigger);
+        if self.editor_more {
+            let mut menu = col()
+                .id("ed-more-menu")
+                .occlude()
+                .mt(px(6.))
+                .w(px(240.))
+                .p(px(4.))
+                .gap(px(1.))
+                .rounded(t::R)
+                .bg(t::surface_2())
+                .border_1()
+                .border_color(t::line())
+                .shadow(vec![gpui::BoxShadow {
+                    color: t::toast_shadow(),
+                    offset: gpui::point(px(0.), px(8.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                }])
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.editor_more = false;
+                    cx.notify();
+                }));
+            if can_reprocess || reprocessing {
+                let label = if reprocessing {
+                    "Reprocessing…"
+                } else {
+                    "Reprocess subtitle"
+                };
+                menu = menu.child(more_row("more-reprocess", label, reprocessing).when(
+                    !reprocessing,
+                    |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| {
+                            this.editor_more = false;
+                            this.ask_reprocess(cx);
+                        }))
+                    },
+                ));
+            }
+            if show_summarize || summarizing {
+                let label = if summarizing {
+                    "Summarizing…"
+                } else {
+                    "Summarize"
+                };
+                menu = menu.child(more_row("more-summarize", label, summarizing).when(
+                    !summarizing,
+                    |d| {
+                        d.on_click(cx.listener(|this, _, w, cx| {
+                            this.editor_more = false;
+                            this.open_summarize(w, cx);
+                        }))
+                    },
+                ));
+            }
+            if can_identify && primary != Some(Primary::Speakers) {
+                let label = if p.has_speakers() {
+                    "Identify again"
+                } else {
+                    "Identify speakers"
+                };
+                menu = menu.child(
+                    more_row("more-speakers", label, false).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.editor_more = false;
+                            this.identify_speakers(cx);
+                        },
+                    )),
+                );
+            }
+            if p.translate && p.status != Status::Working {
+                menu = menu.child(
+                    more_row("more-retranslate", "Retranslate all", false).on_click(cx.listener(
+                        move |this, _, w, cx| {
+                            this.editor_more = false;
+                            this.retranslate(all.clone(), w, cx);
+                        },
+                    )),
+                );
+            }
+            let has_media = (p.video_path.is_some() && p.status != Status::Live)
+                || (p.kind == Kind::Audio && p.source_path.is_some());
+            if has_media {
+                menu = menu.child(div().h(px(1.)).my(px(4.)).mx(px(4.)).bg(t::line_soft()));
+            }
+            if p.video_path.is_some() && p.status != Status::Live {
+                menu = menu.child(more_row("more-video", "Open video", false).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.editor_more = false;
+                        this.open_video(cx);
+                    }),
+                ));
+            }
+            if p.kind == Kind::Audio && p.source_path.is_some() {
+                menu = menu.child(more_row("more-audio", "Show audio", false).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.editor_more = false;
+                        this.reveal_recording(cx);
+                    }),
+                ));
+            }
+            more_wrap = more_wrap.child(
+                deferred(
+                    anchored()
+                        .anchor(Corner::TopRight)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(menu),
                 )
-            })
+                .with_priority(2),
+            );
+        }
+        right = right.child(more_wrap);
+
+        bar.child(fill()).child(right)
     }
 
     fn line_list(
@@ -672,6 +788,39 @@ impl Workbench {
         let focused = self.seg_input.read(cx).focus_handle(cx).is_focused(window);
         let translating = p.status == Status::Working || capturing;
         let playing = self.playing_line();
+        let header = (!stacked && p.translate).then(|| {
+            let rail = if p.has_speakers() { RAIL_W + 12. } else { 0. };
+            let label = |text: &'static str| {
+                div()
+                    .text_size(t::T_SMALL)
+                    .font_weight(weight(600.))
+                    .text_color(t::text_3())
+                    .child(text)
+            };
+            div()
+                .flex_none()
+                .bg(t::surface())
+                .border_b_1()
+                .border_color(t::line_soft())
+                .px(bp.pad_x())
+                .py(px(9.))
+                .child(
+                    row()
+                        .items_start()
+                        .gap(px(12.))
+                        .child(label("Time").w(px(TIME_W)).flex_none())
+                        .child(
+                            row()
+                                .flex_1()
+                                .min_w_0()
+                                .items_start()
+                                .gap(px(20.))
+                                .when(p.has_speakers(), |d| d.pl(px(rail)))
+                                .child(label("Original").flex_1().min_w_0())
+                                .child(label("Translation").flex_1().min_w_0()),
+                        ),
+                )
+        });
         let list = div()
             .id("lines")
             .flex_1()
@@ -701,9 +850,15 @@ impl Workbench {
                         .py(px(20.)),
                 )
             });
-        with_scroll_bar("lines-frame", list, &self.lines_scroll)
+        col()
             .flex_1()
             .min_h_0()
+            .children(header)
+            .child(
+                with_scroll_bar("lines-frame", list, &self.lines_scroll)
+                    .flex_1()
+                    .min_h_0(),
+            )
             .into_any_element()
     }
 
