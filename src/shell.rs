@@ -181,7 +181,7 @@ impl Workbench {
                     .pr(px(10.))
                     .child(div().w(px(78.)).h_full().flex_none())
                     .child(left)
-                    .child(div().w(px(12.)).flex_none().h_full())
+                    .child(div().flex_1().h_full().min_w(px(12.)))
                     .child(right),
             )
             .into_any_element()
