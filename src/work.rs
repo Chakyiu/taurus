@@ -225,7 +225,6 @@ impl Workbench {
         changed |= self.sync_video(cx);
         changed |= self.sync_live_preview(cx);
         changed |= self.follow_playback();
-        self.check_daily_for_update(cx);
         if self.last_save.elapsed() > Duration::from_millis(1500) {
             self.last_save = Instant::now();
             self.autosave(cx);
@@ -3345,8 +3344,8 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Release builds look once a day while updates are automatic.
-    fn check_daily_for_update(&mut self, cx: &mut Context<Self>) {
+    /// Release builds look once a day at launch while updates are automatic.
+    pub(crate) fn check_daily_for_update(&mut self, cx: &mut Context<Self>) {
         let settled = matches!(
             self.update,
             UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_)

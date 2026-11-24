@@ -1222,7 +1222,7 @@ impl Workbench {
                             ),
                         )
                         .child(hint(
-                            "Looks for a new version once a day and installs it in the background, ready for the next time Taurus starts.",
+                            "Looks for a new version once a day when Taurus starts and installs it in the background, ready for the next restart.",
                         ))
                     }),
             )
