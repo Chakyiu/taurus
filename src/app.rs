@@ -896,6 +896,7 @@ impl Workbench {
             }
         }
         this.debug_start(window, cx);
+        this.check_daily_for_update(cx);
         this
     }
 

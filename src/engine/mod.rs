@@ -59,7 +59,7 @@ pub struct Settings {
     pub profile: String,
     /// The choices of the last capture started, which the dialog opens with.
     pub last_capture: Option<CaptureProfile>,
-    /// Look for a new release once a day and install it in the background.
+    /// Look for a new release once a day at launch and install it in the background.
     pub auto_update: bool,
     /// When a new release was last looked for, in seconds since 1970.
     pub update_checked: i64,
