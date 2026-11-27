@@ -22,7 +22,7 @@
 - **Review.** Each line is checked against reading speed and line length: 17 characters per second and 42 characters for Latin text, and 15 characters per second and 16 characters for Chinese, Japanese and Korean, whose characters are about twice as wide. It also checks the gap to the next line. "Only lines to check" shows just the lines that need work, including any with a suggested fix. Click any text to edit it.
 - **Playback.** Play the project's audio, click a timestamp to jump to it, and the list follows along. Space plays and pauses.
 - **Glossary.** Terms you prefer, keep untranslated, or never want to see. Each one applies to every project or to just one.
-- **Export.** SRT, VTT, ASS or plain text. You can include the original, the translation or both, with optional speaker names, line wrapping and merging.
+- **Export.** SRT, VTT, ASS, plain text, or a video with the subtitles embedded in the file. The original video is left where it is. You can include the original, the translation or both, with optional speaker names, line wrapping and merging.
 - **Updates.** Taurus looks for a new release once a day, downloads it in the background, checks it against its published checksum and puts it in place; **Restart to update** in the top bar starts the new version. **About** shows the version, checks on demand, and turns automatic updates off.
 
 <p align="center">

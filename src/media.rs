@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::Value;
@@ -52,6 +52,8 @@ pub struct AudioTrack {
 pub struct Probe {
     pub duration_ms: i64,
     pub video: Option<String>,
+    /// Codec of `video` (`h264`, `hevc`, …) when there is a picture.
+    pub video_codec: Option<String>,
     pub subs: Vec<SubTrack>,
     pub audio: Vec<AudioTrack>,
 }
@@ -98,6 +100,7 @@ pub fn probe(path: &Path) -> Result<Probe> {
                     let w = s["width"].as_u64().unwrap_or(0);
                     let h = s["height"].as_u64().unwrap_or(0);
                     probe.video = Some(format!("{} {w}×{h}", video_codec_name(&codec)));
+                    probe.video_codec = Some(codec);
                 }
             }
             Some("audio") => probe.audio.push(AudioTrack {
@@ -296,11 +299,29 @@ fn first_line(bytes: &[u8]) -> Option<String> {
         .map(String::from)
 }
 
-/// Burns `script` (an ASS document) into a new video at `dest`. The source
-/// file is only read. Audio is copied. `progress` receives 0–1 from ffmpeg's
-/// `out_time_us` when `duration_ms` is known. A set `cancel` flag kills the
-/// encode and removes the partial file.
-pub fn burn_subtitles(
+static SRT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// True when the picture and every audio stream already play in QuickTime
+/// inside an mp4, so the export can copy them instead of re-encoding.
+fn can_stream_copy(probe: &Probe) -> bool {
+    let video = matches!(
+        probe.video_codec.as_deref(),
+        Some("h264" | "hevc" | "mpeg4")
+    );
+    let audio = probe
+        .audio
+        .iter()
+        .all(|a| matches!(a.codec.as_str(), "aac" | "mp3" | "ac3" | "eac3"));
+    video && audio
+}
+
+/// Muxes `script` (SRT) into a new video at `dest` as a subtitle track. The
+/// source file is only read. Picture and sound that QuickTime already plays
+/// are copied; anything else is re-encoded, because a normal ffmpeg build
+/// cannot draw subtitles onto the picture. `progress` receives 0–1 from
+/// ffmpeg's `out_time_us` when `duration_ms` is known. A set `cancel` flag
+/// kills the encode and removes the partial file.
+pub fn embed_subtitles(
     video: &Path,
     script: &str,
     dest: &Path,
@@ -312,16 +333,13 @@ pub fn burn_subtitles(
         bail!("cancelled");
     }
     let ffmpeg = need("ffmpeg")?;
-    let ass_path = std::env::temp_dir().join(format!(
-        "taurus-{}-{}.ass",
+    let srt_path = std::env::temp_dir().join(format!(
+        "taurus-{}-{}.srt",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
+        SRT_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&ass_path, script.as_bytes()).context("writing the subtitle script")?;
-    let _ass = Scratch::remove(ass_path.clone());
+    std::fs::write(&srt_path, script.as_bytes()).context("writing the subtitle file")?;
+    let _srt = Scratch::remove(srt_path.clone());
 
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).ok();
@@ -334,23 +352,62 @@ pub fn burn_subtitles(
     ));
     let mut partial = Scratch::remove(tmp.clone());
 
-    let filter = format!(
-        "subtitles='{}':charenc=UTF-8:fontsdir='{}'",
-        filter_escape(&ass_path),
-        filter_escape(Path::new("/System/Library/Fonts"))
-    );
-    let mut child = Command::new(&ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
-        .arg(video)
-        .args(["-vf"])
-        .arg(&filter)
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-sn",
-            "-dn",
+    let probed = probe(video).ok();
+    let mut copy = probed.as_ref().is_some_and(can_stream_copy);
+    let hevc = probed.as_ref().and_then(|p| p.video_codec.as_deref()) == Some("hevc");
+    loop {
+        let job = Mux {
+            ffmpeg: &ffmpeg,
+            video,
+            srt: &srt_path,
+            tmp: &tmp,
+            copy,
+            tag_hevc: copy && hevc,
+            duration_ms,
+            cancel,
+        };
+        match mux(&job, &mut progress) {
+            Ok(()) => break,
+            Err(e) if e.to_string() == "cancelled" || !copy => return Err(e),
+            Err(_) => {
+                copy = false;
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+    std::fs::rename(&tmp, dest).context("saving the video")?;
+    partial.keep = true;
+    progress(1.0);
+    Ok(())
+}
+
+struct Mux<'a> {
+    ffmpeg: &'a Path,
+    video: &'a Path,
+    srt: &'a Path,
+    tmp: &'a Path,
+    copy: bool,
+    tag_hevc: bool,
+    duration_ms: i64,
+    cancel: &'a Arc<AtomicBool>,
+}
+
+fn mux(job: &Mux<'_>, progress: &mut impl FnMut(f32)) -> Result<()> {
+    let mut cmd = Command::new(job.ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .arg(job.video)
+        .arg("-i")
+        .arg(job.srt)
+        .args(["-map", "0:v:0", "-map", "0:a?", "-map", "1:0"]);
+    if job.copy {
+        cmd.args(["-c:v", "copy", "-c:a", "copy"]);
+        if job.tag_hevc {
+            cmd.args(["-tag:v", "hvc1"]);
+        }
+    } else {
+        cmd.args([
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v",
             "libx264",
             "-preset",
@@ -360,14 +417,24 @@ pub fn burn_subtitles(
             "-pix_fmt",
             "yuv420p",
             "-c:a",
-            "copy",
+            "aac",
+        ]);
+    }
+    let mut child = cmd
+        .args([
+            "-c:s",
+            "mov_text",
+            "-disposition:s:0",
+            "default",
             "-movflags",
             "+faststart",
             "-progress",
             "pipe:1",
             "-nostats",
+            "-f",
+            "mp4",
         ])
-        .arg(&tmp)
+        .arg(job.tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -376,7 +443,7 @@ pub fn burn_subtitles(
 
     let finished = Arc::new(AtomicBool::new(false));
     let finished2 = Arc::clone(&finished);
-    let cancel2 = Arc::clone(cancel);
+    let cancel2 = Arc::clone(job.cancel);
     let pid = child.id();
     std::thread::spawn(move || {
         while !finished2.load(Ordering::Relaxed) {
@@ -403,7 +470,7 @@ pub fn burn_subtitles(
     let mut line = String::new();
     let mut last_pct = -1.0f32;
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if job.cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = err_task.join();
@@ -418,16 +485,16 @@ pub fn burn_subtitles(
                     .strip_prefix("out_time_us=")
                     .and_then(|v| v.parse::<i64>().ok());
                 if let Some(us) = us
-                    && duration_ms > 0
+                    && job.duration_ms > 0
                 {
-                    let pct = (us as f32 / (duration_ms as f32 * 1000.0)).clamp(0.0, 0.99);
+                    let pct = (us as f32 / (job.duration_ms as f32 * 1000.0)).clamp(0.0, 0.99);
                     if pct - last_pct >= 0.01 {
                         last_pct = pct;
                         progress(pct);
                     }
                 }
             }
-            Err(_) if cancel.load(Ordering::Relaxed) => {
+            Err(_) if job.cancel.load(Ordering::Relaxed) => {
                 let _ = child.wait();
                 let _ = err_task.join();
                 bail!("cancelled");
@@ -440,7 +507,7 @@ pub fn burn_subtitles(
             }
         }
     }
-    if cancel.load(Ordering::Relaxed) {
+    if job.cancel.load(Ordering::Relaxed) {
         let _ = child.kill();
         let _ = child.wait();
         let _ = err_task.join();
@@ -448,7 +515,7 @@ pub fn burn_subtitles(
     }
     let status = child.wait().context("waiting for ffmpeg")?;
     let err = err_task.join().unwrap_or_default();
-    if cancel.load(Ordering::Relaxed) {
+    if job.cancel.load(Ordering::Relaxed) {
         bail!("cancelled");
     }
     if !status.success() {
@@ -457,23 +524,7 @@ pub fn burn_subtitles(
             last_line(&err).unwrap_or_else(|| "ffmpeg could not write the video".into())
         );
     }
-    std::fs::rename(&tmp, dest).context("saving the video")?;
-    partial.keep = true;
-    progress(1.0);
     Ok(())
-}
-
-/// Characters that end a filter option or a filtergraph. The path is also
-/// wrapped in single quotes.
-fn filter_escape(path: &Path) -> String {
-    let mut out = String::new();
-    for c in path.to_string_lossy().chars() {
-        if matches!(c, '\\' | ':' | '\'' | ',' | '[' | ']') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }
 
 fn last_line(bytes: &[u8]) -> Option<String> {
@@ -519,5 +570,132 @@ pub fn file_size_label(path: &Path) -> String {
         Ok(n) if n >= 1 << 20 => format!("{:.0} MB", n as f64 / (1u64 << 20) as f64),
         Ok(n) => format!("{:.0} KB", (n as f64 / 1024.0).max(1.0)),
         Err(_) => "–".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{embed_subtitles, probe, tool};
+
+    const CUE: &str = "1\n00:00:00,000 --> 00:00:00,300\n你好\n";
+
+    fn ffmpeg() -> Option<PathBuf> {
+        tool("ffprobe")?;
+        tool("ffmpeg")
+    }
+
+    fn video_md5(ffmpeg: &std::path::Path, path: &std::path::Path) -> String {
+        let out = Command::new(ffmpeg)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:v:0", "-c", "copy", "-f", "md5", "-"])
+            .output()
+            .ok();
+        out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn cue_text(ffmpeg: &std::path::Path, path: &std::path::Path) -> String {
+        let out = Command::new(ffmpeg)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:s:0", "-f", "srt", "-"])
+            .output();
+        out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn copies_h264_and_embeds_the_cue() {
+        let Some(ffmpeg) = ffmpeg() else { return };
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("taurus-emb-h264-{}.mp4", std::process::id()));
+        let dest = dir.join(format!("taurus-emb-h264-out-{}.mp4", std::process::id()));
+        let built = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=0x2244aa:s=160x90:d=0.4",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-an",
+            ])
+            .arg(&src)
+            .status();
+        if built.is_err() || !built.unwrap().success() {
+            let _ = std::fs::remove_file(&src);
+            return;
+        }
+        let before = video_md5(&ffmpeg, &src);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = embed_subtitles(&src, CUE, &dest, 400, &cancel, |_| {});
+        let after = video_md5(&ffmpeg, &dest);
+        let text = cue_text(&ffmpeg, &dest);
+        let kind = probe(&dest).ok().and_then(|p| p.video_codec);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dest);
+        result.expect("embed");
+        assert_eq!(kind.as_deref(), Some("h264"));
+        assert_eq!(before, after, "h264 picture should be copied");
+        assert!(text.contains("你好"), "{text}");
+    }
+
+    #[test]
+    fn reencodes_pcm_audio_and_embeds_the_cue() {
+        let Some(ffmpeg) = ffmpeg() else { return };
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("taurus-emb-pcm-{}.mov", std::process::id()));
+        let dest = dir.join(format!("taurus-emb-pcm-out-{}.mp4", std::process::id()));
+        let built = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=0x2244aa:s=160x90:d=0.4",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.4",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "pcm_s16le",
+                "-shortest",
+            ])
+            .arg(&src)
+            .status();
+        if built.is_err() || !built.unwrap().success() {
+            let _ = std::fs::remove_file(&src);
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = embed_subtitles(&src, CUE, &dest, 400, &cancel, |_| {});
+        let text = cue_text(&ffmpeg, &dest);
+        let audio = probe(&dest)
+            .ok()
+            .and_then(|p| p.audio.first().map(|a| a.codec.clone()));
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dest);
+        result.expect("embed");
+        assert_eq!(audio.as_deref(), Some("aac"));
+        assert!(text.contains("你好"), "{text}");
     }
 }

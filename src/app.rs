@@ -443,7 +443,7 @@ pub struct CorrectJob {
     pub(crate) cancel: Arc<AtomicBool>,
 }
 
-/// A video being written with this project's cues burned into the picture.
+/// A video being written with this project's cues in a subtitle track.
 pub struct VideoExport {
     pub pct: f32,
     pub pid: String,
@@ -531,7 +531,7 @@ pub struct Workbench {
     /// The summary currently being written, if any.
     pub summary_job: Option<SummaryJob>,
     pub correcting: Option<CorrectJob>,
-    /// A burned-in video export in flight, if any.
+    /// A video export in flight, if any.
     pub video_export: Option<VideoExport>,
     pub downloads: HashMap<String, Download>,
     pub update: UpdateState,
@@ -2654,7 +2654,7 @@ impl Workbench {
             .unwrap_or_else(std::env::temp_dir)
     }
 
-    /// Asks where to write, then burns the cues into a new video on a background thread.
+    /// Asks where to write, then muxes the cues into a new video on a background thread.
     fn start_video_export(&mut self, built: Built, cx: &mut Context<Self>) {
         if self.video_export.is_some() {
             self.toast(
