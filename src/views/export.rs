@@ -107,7 +107,7 @@ impl Workbench {
             .child(
                 field("Format", formats).when(e.format == Format::Video, |d| {
                     d.child(hint(
-                        "Burns these lines into a new video. The original file is left as it is.",
+                        "Puts these lines in the new video as a subtitle track. The original file is left as it is.",
                     ))
                 }),
             )

@@ -346,7 +346,7 @@ pub enum Format {
     Vtt,
     Ass,
     Txt,
-    /// A new video with the cues burned into the picture.
+    /// A new video with the cues in a subtitle track.
     Video,
 }
 
@@ -1549,7 +1549,7 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
             rows.push(one(Role::Idx, "WEBVTT"));
             rows.push(one(Role::Raw, ""));
         }
-        Format::Ass | Format::Video => {
+        Format::Ass => {
             rows.push(one(Role::Idx, "[Script Info]"));
             for l in [
                 "ScriptType: v4.00+",
@@ -1582,7 +1582,7 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
                 }
                 rows.push(one(Role::Raw, ""));
             }
-            Format::Ass | Format::Video => {
+            Format::Ass => {
                 let text = g
                     .iter()
                     .map(|(_, lines)| {
@@ -1607,8 +1607,9 @@ pub fn build_export(glossary: &[Term], p: &Project, o: &ExportOptions) -> Built 
                     (Role::A, text),
                 ]);
             }
-            Format::Srt | Format::Vtt => {
-                if o.format == Format::Srt {
+            // Video is an mp4. Its body is the SRT track that gets muxed in.
+            Format::Srt | Format::Vtt | Format::Video => {
+                if o.format != Format::Vtt {
                     rows.push(one(Role::Idx, &(i + 1).to_string()));
                 }
                 let tc = if o.format == Format::Vtt {
@@ -1923,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn video_export_is_a_burnable_script() {
+    fn video_export_is_an_srt_track() {
         let mut p = Project::new(
             "t".into(),
             Kind::Video,
@@ -1951,13 +1952,9 @@ mod tests {
         );
         assert_eq!(b.count, 1);
         assert_eq!(b.filename, "Talk.subtitled.mp4");
-        assert!(b.text.starts_with("[Script Info]"));
         assert!(!b.text.starts_with('\u{FEFF}'));
-        assert!(b.text.contains("PingFang SC"));
-        assert!(
-            b.text
-                .contains(r"Dialogue: 0,0:00:00.00,0:00:01.50,Default,你好\Na \{b\} c\\d")
-        );
+        assert!(b.text.starts_with("1\n00:00:00,000 --> 00:00:01,500\n"));
+        assert!(b.text.contains("你好\na {b} c\\d"), "{}", b.text);
     }
 
     #[test]

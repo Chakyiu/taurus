@@ -3164,9 +3164,10 @@ impl Workbench {
         let tx = self.bg_tx.clone();
         spawn("video", move || {
             let duration_ms = media::probe(&src).map(|p| p.duration_ms).unwrap_or(0);
-            let result = media::burn_subtitles(&src, &script, &dest, duration_ms, &cancel, |pct| {
-                let _ = tx.send(Bg::VideoProgress { pct });
-            });
+            let result =
+                media::embed_subtitles(&src, &script, &dest, duration_ms, &cancel, |pct| {
+                    let _ = tx.send(Bg::VideoProgress { pct });
+                });
             match result {
                 Ok(()) => {
                     let _ = tx.send(Bg::VideoReady { path: dest });
